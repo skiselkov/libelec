@@ -44,7 +44,8 @@ typedef struct {
 
 typedef struct elec_gen_info_s {
 	bool_t	ac;		/* B_TRUE = AC, B_FALSE = DC */
-	double	volts;		/* nominal voltage at min rpm */
+	double	volts;		/* nominal voltage at operating rpm */
+	double	stab_rate;	/* stabilization adaptation rate (FILTER_IN) */
 	double	min_rpm;	/* min rpm at which volts can be achieved */
 	double	max_rpm;	/* max rpm above which regulation fails */
 	double	max_amps;	/* max current in Amps */
@@ -54,7 +55,7 @@ typedef struct elec_gen_info_s {
 } elec_gen_info_t;
 
 typedef struct {
-	double		in_volts_min;	/* minimum input regulator voltage */
+	double		in_volts;	/* nominal input voltage */
 	double		out_volts;	/* nominal output voltage */
 	double		max_amps;	/* max current in Amps */
 	vect2_t		*eff_curve;	/* output amps -> efficiency curve */
@@ -64,8 +65,8 @@ typedef struct {
 
 typedef struct {
 	bool_t		stab;		/* Stabilized PSU, or const-current? */
-	double		input_cap;	/* Input capacity in Coulomb */
-	double		min_volt;	/* minimum voltage to operate */
+	double		input_cap;	/* Input capacitance in Coulomb */
+	double		min_volts;	/* minimum voltage to operate */
 	/* Unstabilized loads return Amps, stabilized loads return Watts. */
 	double		(*get_load)(elec_comp_t *comp);
 } elec_load_info_t;

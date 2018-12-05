@@ -20,7 +20,8 @@
 
 #include "libelec.h"
 
-#define	EXEC_INTVAL	50000	/* us */
+#define	EXEC_INTVAL		50000	/* us */
+#define	MAX_NETWORK_DEPTH	100	/* dimensionless */
 
 struct elec_sys_s {
 	worker_t	worker;
@@ -72,8 +73,12 @@ struct elec_comp_s {
 	elec_sys_t		*sys;
 	const elec_comp_info_t	*info;
 
-	double			voltage;
-	double			current;
+	double			in_volts;
+	double			out_volts;
+	double			in_amps;
+	double			out_amps;
+	elec_comp_t		*src;
+	elec_comp_t		*upstream;
 
 	bool_t			seen;
 
@@ -94,6 +99,9 @@ struct elec_comp_s {
 
 static bool_t elec_sys_worker(void *userinfo);
 static void comp_free(elec_comp_t *comp);
+static void network_paint_src_comp(elec_comp_t *src, elec_comp_t *upstream,
+    elec_comp_t *comp, unsigned depth);
+static void network_load_integrate_comp(elec_comp_t *comp, unsigned depth);
 
 static int
 info2comp_compar(const void *a, const void *b)
@@ -232,12 +240,23 @@ libelec_new(elec_comp_info_t **comp_infos)
 			ASSERT3F(comp->info->gen.volts, >, 0);
 			ASSERT3F(comp->info->gen.min_rpm, >, 0);
 			ASSERT3F(comp->info->gen.max_rpm, >, 0);
+			ASSERT3F(comp->info->gen.min_rpm, <,
+			    comp->info->gen.max_rpm);
 			ASSERT3F(comp->info->gen.max_amps, >, 0);
 			ASSERT(comp->info->gen.eff_curve != NULL);
 			ASSERT(comp->info->gen.get_rpm != NULL);
+			comp->gen.ctr_rpm = AVG(comp->info->gen.min_rpm,
+			    comp->info->gen.max_rpm);
+			comp->gen.max_comp =
+			    comp->gen.ctr_rpm / comp->gen.min_rpm;
+			comp->gen.min_comp =
+			    comp->gen.ctr_rpm / comp->gen.max_rpm;
 			break;
 		case ELEC_TRU:
 			ASSERT3F(comp->info->tru.in_volts_min, >, 0);
+			ASSERT3F(comp->info->tru.in_volts_max, >, 0);
+			ASSERT3F(comp->info->tru.in_volts_min, >=,
+			    comp->info->tru.in_volts_max);
 			ASSERT3F(comp->info->tru.out_volts, >, 0);
 			ASSERT3F(comp->info->tru.max_amps, >, 0);
 			ASSERT(comp->info->tru.eff_curve != NULL);
@@ -245,7 +264,7 @@ libelec_new(elec_comp_info_t **comp_infos)
 			ASSERT(comp->info->tru.dc != NULL);
 			break;
 		case ELEC_LOAD:
-			ASSERT3F(comp->info->load.min_volt, >, 0);
+			ASSERT3F(comp->info->load.min_volts, >, 0);
 			ASSERT(comp->info->load.get_load != NULL);
 			break;
 		case ELEC_BUS:
@@ -299,6 +318,421 @@ libelec_comp_get_info(const elec_comp_t *comp)
 	return (comp->info);
 }
 
+static void
+network_reset(elec_sys_t *sys)
+{
+	ASSERT(sys != NULL);
+
+	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
+	    comp = list_next(&sys->comps, comp)) {
+		comp->upstream = NULL;
+		comp->src = NULL;
+		comp->in_volts = 0;
+		comp->in_amps = 0;
+		comp->out_volts = 0;
+		comp->out_amps = 0;
+	}
+}
+
+static double
+comp_update_gen(elec_comp_t *gen, double d_t)
+{
+	double rpm, stab_factor;
+
+	ASSERT(gen != NULL);
+	ASSERT(gen->info != NULL);
+	ASSERT3U(gen->info->type, ==, ELEC_GEN);
+	ASSERT(gen->info->gen.get_rpm != NULL);
+
+	rpm = gen->info->gen.get_rpm(comp);
+	ASSERT(!isnan(rpm));
+	rpm = MAX(rpm, 1);
+	/*
+	 * Gradual voltage stabilization adjustment, to simulate that
+	 * the CSD takes a little time to adjust to rpm changes.
+	 */
+	stab_factor = clamp(gen->gen.ctr_rpm / rpm,
+	    gen->gen.min_stab, gen->gen.max_stab);
+	FILTER_IN(gen->gen.stab_factor, stab_factor, d_t,
+	    gen->info->gen.stab_rate);
+
+	gen->out_volts = (rpm / gen->gen.ctr_rpm) * gen->gen.stab_factor *
+	    gen->info->gen.volts;
+}
+
+static void
+comps_update(elec_sys_t *sys, double d_t)
+{
+	ASSERT(sys != NULL);
+	ASSERT3F(d_t, >, 0);
+
+	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
+	    comp = list_next(&sys->comps, comp)) {
+		ASSERT(comp->info != NULL);
+		if (comp->info->type == ELEC_GEN)
+			comp_update_gen(comp, d_t);
+	}
+}
+
+static void
+network_paint_src_bus(elec_comp_t *src, elec_comp_t *upstream,
+    elec_comp_t *comp, unsigned depth)
+{
+	ASSERT(src != NULL);
+	ASSERT(upstream != NULL);
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT3U(comp->info->type, ==, ELEC_BUS);
+	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
+
+	if (comp->in_volts < src->out_volts) {
+		comp->src = src;
+		comp->upstream = upstream;
+		comp->in_volts = src->out_volts;
+
+		for (unsigned i = 0; i < comp->bus.n_comps; i++) {
+			if (upstream != comp->bus.comps[i]) {
+				network_paint_src_comp(src, comp,
+				    comp->bus.comps[i], depth + 1);
+			}
+		}
+	}
+}
+
+static void
+network_paint_src_tie(elec_comp_t *src, elec_comp_t *upstream,
+    elec_comp_t *comp, unsigned depth)
+{
+	bool_t found = B_FALSE, tied = B_FALSE;
+
+	ASSERT(src != NULL);
+	ASSERT(upstream != NULL);
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT3U(comp->info->type, ==, ELEC_TIE);
+	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
+
+	/* Check if the upstream bus is currently tied */
+	for (unsigned i = 0; i < comp->tie.n_buses; i++) {
+		if (upstream == comp->tie.buses[i]) {
+			if (comp->tie.status[i]) {
+				if (comp->in_volts < src->out_volts) {
+					comp->src = src;
+					comp->upstream = upstream;
+					comp->in_volts = src->out_volts;
+				}
+				tied = B_TRUE;
+			}
+			found = B_TRUE;
+			break;
+		}
+	}
+	ASSERT(found);
+	if (tied) {
+		for (unsigned i = 0; i < comp->tie.n_buses; i++) {
+			if (upstream != comp->tie.buses[i] &&
+			    comp->tie.status[i]) {
+				network_paint_src_comp(src, comp,
+				    comp->tie.buses[i], depth + 1);
+			}
+		}
+	}
+}
+
+static void
+network_paint_src_tru(elec_comp_t *src, elec_comp_t *upstream,
+    elec_comp_t *comp, unsigned depth)
+{
+	ASSERT(src != NULL);
+	ASSERT(upstream != NULL);
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT3U(comp->info->type, ==, ELEC_TRU);
+	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
+
+	/* Output rectification prevents back-flow of power from DC to AC */
+	if (upstream == comp->tru.ac && comp->in_volts < src->out_volts) {
+		comp->src = src;
+		comp->upstream = upstream;
+		comp->in_volts = src->out_volts;
+		comp->out_volts = comp->info->tru.out_volts *
+		    (comp->in_volts / comp->info->tru.in_volts);
+		ASSERT(comp->tru.dc != NULL);
+		network_paint_src_comp(comp, comp, comp->tru.dc, depth + 1);
+	}
+}
+
+static void
+network_paint_src_cb(elec_comp_t *src, elec_comp_t *upstream,
+    elec_comp_t *comp, unsigned depth)
+{
+	ASSERT(src != NULL);
+	ASSERT(upstream != NULL);
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT3U(comp->info->type, ==, ELEC_CB);
+	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
+
+	if (comp->in_volts < src->out_volts) {
+		comp->src = src;
+		comp->upstream = upstream;
+		comp->in_volts = src->out_volts;
+		if (upstream == elec->cb.sides[0]) {
+			network_paint_src_comp(src, comp, elec->cb.sides[1],
+			    depth + 1);
+		} else {
+			ASSERT3P(upstream, ==, elec->cb.sides[1]);
+			network_paint_src_comp(src, comp, elec->cb.sides[0],
+			    depth + 1);
+		}
+	}
+}
+
+static void
+network_paint_src_diode(elec_comp_t *src, elec_comp_t *upstream,
+    elec_comp_t *comp, unsigned depth)
+{
+	ASSERT(src != NULL);
+	ASSERT(upstream != NULL);
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT3U(comp->info->type, ==, ELEC_DIODE);
+	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
+
+	if (upstream == comp->diode.sides[0] &&
+	    comp->in_volts < src->out_volts) {
+		comp->src = src;
+		comp->upstream = upstream;
+		comp->in_volts = src->out_volts;
+		network_paint_src_comp(src, comp, elec->cb.sides[1], depth + 1);
+	}
+}
+
+static void
+network_paint_src_comp(elec_comp_t *src, elec_comp_t *upstream,
+    elec_comp_t *comp, unsigned depth)
+{
+	ASSERT(src != NULL);
+	ASSERT(upstream != NULL);
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
+
+	switch (comp->info->type) {
+	case ELEC_BATT:
+	case ELEC_GEN:
+		/* Electrical sources - don't paint these */
+		break;
+	case ELEC_BUS:
+		network_paint_src_bus(src, upstream, comp, depth);
+		break;
+	case ELEC_TRU:
+		network_paint_src_tru(src, upstream, comp, depth);
+		break;
+	case ELEC_LOAD:
+		if (comp->in_volts < src->out_volts) {
+			comp->src = src;
+			comp->upstream = upstream;
+			comp->in_volts = src->out_volts;
+		}
+		break;
+	case ELEC_CB:
+		network_paint_src_cb(src, upstream, comp, depth);
+		break;
+	case ELEC_TIE:
+		network_paint_src_tie(src, upstream, comp, depth);
+		break;
+	}
+}
+
+static void
+network_paint_src(elec_sys_t *sys, elec_comp_t *comp)
+{
+	elec_comp_t *bus;
+
+	ASSERT(sys != NULL);
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT(comp->info->type == ELEC_BATT || comp->info->type == ELEC_GEN);
+
+	if (comp->info->type == ELEC_BATT)
+		bus = comp->batt.bus;
+	else
+		bus = comp->gen.bus;
+	ASSERT(bus != NULL);
+	network_paint_src_comp(sys, comp, comp, bus, 0);
+}
+
+static void
+network_paint(elec_sys_t *sys)
+{
+	ASSERT(sys != NULL);
+
+	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
+	    comp = list_next(&sys->comps, comp)) {
+		ASSERT(comp->info != NULL);
+		if (comp->info->type == ELEC_BATT ||
+		    comp->info->type == ELEC_GEN)
+			network_paint_src(sys, comp);
+	}
+}
+
+static void
+network_load_integrate_tru(elec_comp_t *comp, unsigned depth)
+{
+	double eff;
+
+	ASSERT(comp != NULL);
+	ASSERT(comp->tru.ac != NULL);
+	ASSERT(comp->tru.dc != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT3U(comp->info->type, ==, ELEC_TRU);
+	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
+
+	comp->out_amps = comp->tru.dc->in_amps;
+	eff = fx_lin_multi(comp->out_amps, comp->info->tru.eff_curve, B_TRUE);
+	ASSERT3F(eff, >, 0);
+	comp->in_amps = ((comp->out_volts / comp->in_volts) * comp->out_amps) /
+	    eff;
+	ASSERT(comp->tru.ac != NULL);
+	network_load_integrate_comp(comp, comp->tru.ac, depth + 1);
+}
+
+static void
+network_load_integrate_load(elec_comp_t *comp, unsigned depth)
+{
+	double load, amps, volts;
+
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT3U(comp->info->type, ==, ELEC_LOAD);
+	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
+
+	if (comp->in_volts >= comp->info->load.min_volts) {
+		ASSERT(comp->info->load.get_load != NULL);
+		load = comp->info->load.get_load(comp);
+	} else {
+		load = 0;
+	}
+	ASSERT3F(load, >=, 0);
+	volts = MAX(comp->in_volts, comp->info->load.min_volts);
+	/* load is in watts */
+	if (comp->info->load.stab)
+		amps = load / volts;
+	else
+		amps = load;
+	comp->in_amps = load;
+	ASSERT(comp->bus != NULL);
+	network_load_integrate_comp(comp, comp->bus, depth + 1);
+}
+
+static void
+network_load_integrate_bus(elec_comp_t *comp, unsigned depth)
+{
+	double amps;
+
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT3U(comp->info->type, ==, ELEC_BUS);
+	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
+
+	for (unsigned i = 0; i < comp->bus.n_comps; i++) {
+		ASSERT(comp->bus.comps[i] != NULL);
+		if (comp->bus.comps[i] != comp->upstream)
+			amps += comp->bus.comps[i]->in_amps;
+	}
+
+	comp->out_amps = amps;
+	comp->in_amps = amps;
+	network_load_integrate_comp(comp, comp->upstream, depth + 1);
+}
+
+static void
+network_load_integrate_tie(elec_comp_t *comp, unsigned depth)
+{
+	double amps;
+
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT3U(comp->info->type, ==, ELEC_TIE);
+	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
+
+	for (unsigned i = 0; i < comp->tie.n_buses; i++) {
+		ASSERT(comp->tie.buses[i] != NULL);
+		if (comp->tie.status[i] && comp->tie.buses[i] != comp->upstream)
+			amps += comp->tie.buses[i]->in_amps;
+	}
+
+	comp->out_amps = amps;
+	comp->in_amps = amps;
+
+	network_load_integrate_comp(comp, comp->upstream, depth + 1);
+}
+
+static void
+network_load_integrate_comp(elec_comp_t *comp, unsigned depth)
+{
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
+
+	if (comp->upstream == NULL) {
+		/* No power supplied to this component */
+		ASSERT0(comp->in_volts);
+		ASSERT0(comp->out_volts);
+		ASSERT3P(comp->src, ==, NULL);
+		return;
+	}
+
+	switch (comp->info->type) {
+	case ELEC_BATT:
+		comp->out_amps = comp->batt.bus->in_amps;
+		break;
+	case ELEC_GEN:
+		comp->out_amps = comp->gen.bus->in_amps;
+		break;
+	case ELEC_TRU:
+		network_load_integrate_tru(comp, depth);
+		break;
+	case ELEC_LOAD:
+		network_load_integrate_load(comp, depth);
+		break;
+	case ELEC_BUS:
+		network_load_integrate_bus(comp, depth);
+		break;
+	case ELEC_CB:
+		if (comp->upstream == comp->cb.sides[0]) {
+			comp->out_amps = comp->cb.sides[1]->in_amps;
+		} else {
+			ASSERT3P(comp->upstream, ==, comp->cb.sides[1]);
+			comp->out_amps = comp->cb.sides[0]->in_amps;
+		}
+		comp->in_amps = comp->out_amps;
+		network_load_integrate_comp(comp, comp->upstream, depth + 1);
+		break;
+	case ELEC_TIE:
+		network_load_integrate_tie(comp, depth);
+		break;
+	case ELEC_DIODE:
+		ASSERT3P(upstream, ==, comp->diode.sides[0]);
+		ASSERT3P(downstream, ==, comp->diode.sides[1]);
+		comp->out_amps = downstream->in_amps;
+		comp->in_amps = comp->out_amps;
+		network_load_integrate_comp(comp, comp->upstream, depth + 1);
+		break;
+	}
+
+static void
+network_load_integrate(elec_sys_t *sys)
+{
+	ASSERT(sys != NULL);
+
+	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
+	    comp = list_next(&sys->comps, comp)) {
+		network_load_integrate_comp(comp, comp, 0);
+	}
+}
+
 static bool_t
 elec_sys_worker(void *userinfo)
 {
@@ -306,6 +740,15 @@ elec_sys_worker(void *userinfo)
 
 	ASSERT(userinfo != NULL);
 	sys = userinfo;
+
+	mutex_enter(&sys->lock);
+
+	network_reset(sys);
+	network_update(sys, USEC2SEC(EXEC_INTVAL));
+	network_paint(sys);
+	network_load_integrate(sys);
+
+	mutex_exit(&sys->lock);
 
 	return (B_TRUE);
 }
