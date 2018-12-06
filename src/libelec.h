@@ -38,8 +38,10 @@ typedef enum {
 
 typedef struct {
 	double	volts;		/* nominal voltage */
-	double	capacity;	/* capacity in Joules */
-	double	max_amps;	/* max current in Amps */
+	double	capacity;	/* capacity in Joules at 15C */
+	double	max_pwr;	/* max power draw in Watts */
+	/* returns the battery temperature in kelvin */
+	double	(*get_temp)(elec_comp_t *comp);
 } elec_batt_info_t;
 
 typedef struct elec_gen_info_s {
@@ -48,8 +50,8 @@ typedef struct elec_gen_info_s {
 	double	stab_rate;	/* stabilization adaptation rate (FILTER_IN) */
 	double	min_rpm;	/* min rpm at which volts can be achieved */
 	double	max_rpm;	/* max rpm above which regulation fails */
-	double	max_amps;	/* max current in Amps */
-	vect2_t	*eff_curve;	/* amps -> efficiency curve for fx_lin_multi */
+	double	max_pwr;	/* max power draw in Watts */
+	vect2_t	*eff_curve;	/* Watts -> efficiency curve for fx_lin_multi */
 	double	(*get_rpm)(struct elec_comp_t *comp);
 	void	*userinfo;
 } elec_gen_info_t;
@@ -57,8 +59,8 @@ typedef struct elec_gen_info_s {
 typedef struct {
 	double		in_volts;	/* nominal input voltage */
 	double		out_volts;	/* nominal output voltage */
-	double		max_amps;	/* max current in Amps */
-	vect2_t		*eff_curve;	/* output amps -> efficiency curve */
+	double		max_pwr;	/* max output power in Watts */
+	vect2_t		*eff_curve;	/* output Watts -> efficiency curve */
 	elec_comp_info_t *ac;		/* AC bus side */
 	elec_comp_info_t *dc;		/* DC bus side */
 } elec_tru_info_t;
@@ -72,6 +74,7 @@ typedef struct {
 } elec_load_info_t;
 
 typedef struct {
+	bool_t			ac;
 	double			impedance;	/* Ohms */
 	elec_comp_info_t	**comps;	/* NULL-terminated */
 } elec_bus_info_t;
@@ -81,15 +84,13 @@ typedef struct {
 } elec_cb_info_t;
 
 typedef struct {
-} elec_tie_info_t;
-
-typedef struct {
-	elec_comp_info_t	sides[2];
+	elec_comp_info_t	*sides[2];
 } elec_diode_info_t;
 
 struct elec_comp_info_s {
 	elec_comp_type_t		type;
 	const char			*name;
+	void				*userinfo;
 	union {
 		elec_batt_info_t	batt;
 		elec_gen_info_t		gen;
@@ -97,15 +98,29 @@ struct elec_comp_info_s {
 		elec_load_info_t	load;
 		elec_bus_info_t		bus;
 		elec_cb_info_t		cb;
-		elec_tie_info_t		ctcr;
 		elec_diode_info_t	diode;
 	};
 };
 
-elec_sys_t *libelec_new(elec_comp_info_t **comp_infos);
+typedef struct {
+	const char	*name;
+	void		*value;
+} elec_func_bind_t;
+
+elec_sys_t *libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos);
 void libelec_destroy(elec_sys_t *sys);
 
+elec_comp_info_t *libelec_infos_parse(const char *filename,
+    elec_func_bind_t *binds, size_t num_binds, size_t *num_infos);
+void libelec_parsed_info_free(elec_comp_info_t *infos, size_t num_infos);
+
 const elec_comp_info_t *libelec_comp_get_info(const elec_comp_t *comp);
+
+void libelec_cb_set(elec_comp_t *comp, bool_t set);
+bool_t libelec_cb_get(const elec_comp_t *comp);
+
+void libelec_tie_set_all(elec_comp_t *comp, bool_t tied);
+bool_t libelec_tie_get_all(const elec_comp_t *comp);
 
 #ifdef __cplusplus
 }
