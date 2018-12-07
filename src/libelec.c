@@ -14,7 +14,10 @@
 
 #include <stddef.h>
 
+#include <acfutils/avl.h>
+#include <acfutils/math.h>
 #include <acfutils/list.h>
+#include <acfutils/perf.h>
 #include <acfutils/safe_alloc.h>
 #include <acfutils/worker.h>
 
@@ -41,6 +44,10 @@ typedef struct {
 
 typedef struct {
 	elec_comp_t	*bus;
+	double		ctr_rpm;
+	double		min_stab;
+	double		max_stab;
+	double		stab_factor;
 } elec_gen_t;
 
 typedef struct {
@@ -64,12 +71,12 @@ typedef struct {
 
 typedef struct {
 	size_t		n_buses;
-	elec_comp_t	*buses;
-	bool_t		*status;
+	elec_comp_t	**buses;
+	bool_t		*state;
 } elec_tie_t;
 
 typedef struct {
-	elec_comp_t	sides[2];	/* bias: sides[0] -> sides[1] */
+	elec_comp_t	*sides[2];	/* bias: sides[0] -> sides[1] */
 } elec_diode_t;
 
 struct elec_comp_s {
@@ -87,7 +94,7 @@ struct elec_comp_s {
 
 	union {
 		elec_batt_t	batt;
-		zelec_gen_t	gen;
+		elec_gen_t	gen;
 		elec_tru_t	tru;
 		elec_load_t	load;
 		elec_bus_t	bus;
@@ -104,12 +111,13 @@ static bool_t elec_sys_worker(void *userinfo);
 static void comp_free(elec_comp_t *comp);
 static void network_paint_src_comp(elec_comp_t *src, elec_comp_t *upstream,
     elec_comp_t *comp, unsigned depth);
-static void network_load_integrate_comp(elec_comp_t *comp, unsigned depth);
+static void network_load_integrate_comp(elec_comp_t *src, elec_comp_t *comp,
+    unsigned depth);
 
 static int
 info2comp_compar(const void *a, const void *b)
 {
-	const elec_comp_t *ca, = a, cb = b;
+	const elec_comp_t *ca = a, *cb = b;
 	if (ca->info < cb->info)
 		return (-1);
 	if (ca->info > cb->info)
@@ -142,21 +150,21 @@ resolve_bus_links(elec_sys_t *sys, elec_comp_t *bus)
 		switch (comp->info->type) {
 		case ELEC_BATT:
 			/* Batteries are DC-only devices! */
-			ASSERT(!bus->ac);
+			ASSERT(!bus->info->bus.ac);
 			comp->batt.bus = bus;
 			break;
 		case ELEC_GEN:
 			/* Generators can be DC or AC */
-			ASSERT3U(bus->ac, ==, comp->gen.ac);
+			ASSERT3U(bus->info->bus.ac, ==, comp->info->gen.ac);
 			comp->gen.bus = bus;
 			break;
 		case ELEC_TRU:
 			if (comp->info->tru.ac == bus->info) {
-				ASSERT(bus->ac);
+				ASSERT(bus->info->bus.ac);
 				comp->tru.ac = bus;
 			} else {
 				ASSERT3P(comp->info->tru.dc, ==, bus->info);
-				ASSERT(!bus->ac);
+				ASSERT(!bus->info->bus.ac);
 				comp->tru.dc = bus;
 			}
 			break;
@@ -169,34 +177,33 @@ resolve_bus_links(elec_sys_t *sys, elec_comp_t *bus)
 			    comp->info->name);
 			break;
 		case ELEC_CB:
-			if (comp->info->cb.sides[0] == bus->info) {
+			if (comp->cb.sides[0] == NULL) {
 				comp->cb.sides[0] = bus;
 			} else {
-				ASSERt3P(comp->info->cb.sides[1], ==,
-				    bus->info);
+				ASSERT3P(comp->cb.sides[1], ==, NULL);
 				comp->cb.sides[1] = bus;
 			}
 			break;
 		case ELEC_TIE:
 			comp->tie.n_buses++;
-			comp->tie.buses = realloc(comp->tie.n_buses *
-			    sizeof (*comp->tie.buses));
+			comp->tie.buses = safe_realloc(comp->tie.buses,
+			    comp->tie.n_buses * sizeof (*comp->tie.buses));
 			comp->tie.buses[comp->tie.n_buses - 1] = bus;
-			free(comp->tie.status);
-			comp->tie.status = safe_calloc(comp->tie.n_buses,
-			    sizeof (*comp->tie.status));
+			free(comp->tie.state);
+			comp->tie.state = safe_calloc(comp->tie.n_buses,
+			    sizeof (*comp->tie.state));
 			break;
 		case ELEC_DIODE:
 			/*
 			 * Diodes are DC-only devices. Don't attempt to build
 			 * rectifiers, use a TRU for that!
 			 */
-			ASSERT(!bus->ac);
+			ASSERT(!bus->info->bus.ac);
 			if (comp->info->diode.sides[0] == bus->info) {
 				comp->diode.sides[0] = bus;
 			} else {
 				ASSERT3P(comp->info->diode.sides[1], ==,
-				    bus->info) {
+				    bus->info);
 				comp->diode.sides[1] = bus;
 			}
 			break;
@@ -213,25 +220,68 @@ resolve_comp_links(elec_sys_t *sys)
 
 	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
 	    comp = list_next(&sys->comps, comp)) {
-
 		if (comp->info->type == ELEC_BUS)
 			resolve_bus_links(sys, comp);
 	}
 }
 
+static void
+check_comp_links(elec_sys_t *sys)
+{
+	ASSERT(sys != NULL);
+
+#define	CHECK_LINK(field) \
+	VERIFY_MSG((field) != NULL, "Component %s is missing a network link", \
+	    comp->info->name)
+	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
+	    comp = list_next(&sys->comps, comp)) {
+		ASSERT(comp->info != NULL);
+		switch (comp->info->type) {
+		case ELEC_BATT:
+			CHECK_LINK(comp->batt.bus);
+			break;
+		case ELEC_GEN:
+			CHECK_LINK(comp->gen.bus);
+			break;
+		case ELEC_TRU:
+			CHECK_LINK(comp->tru.ac);
+			CHECK_LINK(comp->tru.dc);
+			break;
+		case ELEC_LOAD:
+			CHECK_LINK(comp->load.bus);
+			break;
+		case ELEC_BUS:
+			CHECK_LINK(comp->bus.comps);
+			break;
+		case ELEC_CB:
+			CHECK_LINK(comp->cb.sides[0]);
+			CHECK_LINK(comp->cb.sides[1]);
+			break;
+		case ELEC_TIE:
+			CHECK_LINK(comp->tie.buses);
+			break;
+		case ELEC_DIODE:
+			CHECK_LINK(comp->diode.sides[0]);
+			CHECK_LINK(comp->diode.sides[1]);
+			break;
+		}
+	}
+#undef	CHECK_LINK
+}
+
 elec_sys_t *
 libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos)
 {
-	elec_sys_t *sys = safe_alloc(1, sizeof (*sys));
+	elec_sys_t *sys = safe_calloc(1, sizeof (*sys));
 
 	ASSERT(comp_infos != NULL);
-	ASSERT(num_infos, >, 0);
+	ASSERT3U(num_infos, >, 0);
 
 	mutex_init(&sys->lock);
 	list_create(&sys->comps, sizeof (elec_comp_t),
 	    offsetof(elec_comp_t, comps_node));
 	avl_create(&sys->info2comp, info2comp_compar, sizeof (elec_comp_t),
-	    offsetof(elec_comp_t, info2comp_node);
+	    offsetof(elec_comp_t, info2comp_node));
 
 	for (size_t i = 0; i < num_infos; i++) {
 		elec_comp_t *comp = safe_calloc(1, sizeof (*comp));
@@ -239,7 +289,7 @@ libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos)
 
 		comp->sys = sys;
 		comp->info = &comp_infos[i];
-		VERIFY(avl_find(&sys->info2comp, comp, &where) == NULL,
+		VERIFY_MSG(avl_find(&sys->info2comp, comp, &where) == NULL,
 		    "Duplicate elec info usage %s", comp_infos[i].name);
 		avl_insert(&sys->info2comp, comp, where);
 		list_insert_tail(&sys->comps, comp);
@@ -250,6 +300,7 @@ libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos)
 			ASSERT3F(comp->info->batt.volts, >, 0);
 			ASSERT3F(comp->info->batt.max_pwr, >, 0);
 			ASSERT3F(comp->info->batt.capacity, >=, 0);
+			comp->batt.chg_rel = 1.0;
 			break;
 		case ELEC_GEN:
 			ASSERT3F(comp->info->gen.volts, >, 0);
@@ -262,16 +313,13 @@ libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos)
 			ASSERT(comp->info->gen.get_rpm != NULL);
 			comp->gen.ctr_rpm = AVG(comp->info->gen.min_rpm,
 			    comp->info->gen.max_rpm);
-			comp->gen.max_comp =
-			    comp->gen.ctr_rpm / comp->gen.min_rpm;
-			comp->gen.min_comp =
-			    comp->gen.ctr_rpm / comp->gen.max_rpm;
+			comp->gen.max_stab =
+			    comp->gen.ctr_rpm / comp->info->gen.min_rpm;
+			comp->gen.min_stab =
+			    comp->gen.ctr_rpm / comp->info->gen.max_rpm;
 			break;
 		case ELEC_TRU:
-			ASSERT3F(comp->info->tru.in_volts_min, >, 0);
-			ASSERT3F(comp->info->tru.in_volts_max, >, 0);
-			ASSERT3F(comp->info->tru.in_volts_min, >=,
-			    comp->info->tru.in_volts_max);
+			ASSERT3F(comp->info->tru.in_volts, >, 0);
 			ASSERT3F(comp->info->tru.out_volts, >, 0);
 			ASSERT3F(comp->info->tru.max_pwr, >, 0);
 			ASSERT(comp->info->tru.eff_curve != NULL);
@@ -286,6 +334,7 @@ libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos)
 			ASSERT(comp->info->bus.comps != NULL);
 			break;
 		case ELEC_CB:
+			comp->cb.set = B_TRUE;
 			break;
 		case ELEC_TIE:
 			break;
@@ -298,9 +347,15 @@ libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos)
 
 	/* Resolve component links */
 	resolve_comp_links(sys);
+	check_comp_links(sys);
 
+#ifndef	LIBELEC_SLOW_DEBUG
 	worker_init(&sys->worker, elec_sys_worker, EXEC_INTVAL, sys,
 	    "elec_sys");
+#else	/* !LIBELEC_SLOW_DEBUG */
+	worker_init(&sys->worker, elec_sys_worker, 20 * EXEC_INTVAL, sys,
+	    "elec_sys");
+#endif	/* !LIBELEC_SLOW_DEBUG */
 
 	return (sys);
 }
@@ -351,20 +406,94 @@ comp_type2str(elec_comp_type_t type)
 	}
 }
 
+static bool_t
+bind_list_find(const elec_func_bind_t *binds, const char *name, void *ptr)
+{
+	void **pp = (void **)ptr;
+
+	for (size_t i = 0; binds != NULL && binds[i].name != NULL; i++) {
+		if (strcmp(binds[i].name, name) == 0) {
+			*pp = binds[i].value;
+			return (B_TRUE);
+		}
+	}
+	return (B_FALSE);
+}
+
+static bool_t
+add_info_link(elec_comp_info_t *info, elec_comp_info_t *info2,
+    const char *slot_qual)
+{
+	switch (info->type) {
+	case ELEC_TRU:
+		if (slot_qual == NULL)
+			return (B_FALSE);
+		if (strcmp(slot_qual, "AC") == 0) {
+			if (info->tru.ac != NULL)
+				return (B_FALSE);
+			info->tru.ac = info2;
+		} else {
+			if (info->tru.dc != NULL)
+				return (B_FALSE);
+			info->tru.dc = info2;
+		}
+		break;
+	case ELEC_BUS: {
+		size_t num;
+
+		for (num = 0; info->bus.comps != NULL &&
+		    info->bus.comps[num] != NULL; num++)
+			;
+		info->bus.comps = safe_realloc(info->bus.comps,
+		    (num + 2) * sizeof (*info->bus.comps));
+		info->bus.comps[num] = info2;
+		info->bus.comps[num + 1] = NULL;
+		break;
+	}
+	case ELEC_DIODE:
+		if (slot_qual == NULL)
+			return (B_FALSE);
+		if (strcmp(slot_qual, "IN") == 0) {
+			if (info->diode.sides[0] != NULL)
+				return (B_FALSE);
+			info->diode.sides[0] = info2;
+		} else {
+			if (info->diode.sides[1] != NULL)
+				return (B_FALSE);
+			info->diode.sides[1] = info2;
+		}
+		break;
+	default:
+		return(B_TRUE);
+	}
+
+	return (B_TRUE);
+}
+
+static elec_comp_info_t *
+find_comp_info(elec_comp_info_t *infos, size_t num_comps, const char *name)
+{
+	for (unsigned i = 0; i < num_comps; i++) {
+		if (infos[i].name != NULL && strcmp(infos[i].name, name) == 0)
+			return (&infos[i]);
+	}
+	return (NULL);
+}
+
 elec_comp_info_t *
-libelec_infos_parse(const char *filename, elec_func_bind_t *binds,
-    size_t num_binds, size_t *num_infos)
+libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
+    size_t *num_infos)
 {
 	FILE *fp;
 	size_t comp_i = 0, num_comps = 0;
 	elec_comp_info_t *infos;
 	elec_comp_info_t *info = NULL;
 	char *line = NULL;
-	char **comp_names = NULL;
-	size_t linecap = 0, linenum = 0;
+	size_t linecap = 0;
+	unsigned linenum = 0;
 
 	ASSERT(filename != NULL);
-	ASSERT(binds != NULL || num_binds == 0);
+	/* binds can be NULL */
 	ASSERT(num_infos != NULL);
 
 	fp = fopen(filename, "r");
@@ -389,7 +518,6 @@ libelec_infos_parse(const char *filename, elec_func_bind_t *binds,
 	rewind(fp);
 
 	infos = safe_calloc(num_comps, sizeof (*infos));
-	comp_names = safe_calloc(num_comps, sizeof (*comp_names));
 
 	linenum = 0;
 	while (parser_get_next_line(fp, &line, &linecap, &linenum) > 0) {
@@ -406,13 +534,7 @@ libelec_infos_parse(const char *filename, elec_func_bind_t *binds,
 	} while (0)
 #define	GET_USERPTR(field) \
 	do { \
-		for (size_t i = 0; i < num_binds; i++) { \
-			if (strcmp(binds[i].name, comps[2]) == 0) { \
-				field = binds[i].value; \
-				break; \
-			} \
-		} \
-		if (field == NULL) { \
+		if (!bind_list_find(binds, comps[2], &(field))) { \
 			logMsg("%s:%d: USERPTR %s not found in bind list", \
 			    filename, linenum, comps[2]); \
 			free_strlist(comps, n_comps); \
@@ -420,44 +542,42 @@ libelec_infos_parse(const char *filename, elec_func_bind_t *binds,
 		} \
 	} while (0)
 
-		free_strlist(comps, n_comps); \
-		goto errout; \
-
 		comps = strsplit(line, " ", B_TRUE, &n_comps);
 		cmd = comps[0];
 		if (strcmp(cmd, "BATT") == 0 && n_comps == 2) {
-			comp_names[comp_i] = strdup(comps[1]);
 			info = &infos[comp_i++];
 			info->type = ELEC_BATT;
+			info->name = strdup(comps[1]);
 		} else if (strcmp(cmd, "GEN") == 0 && n_comps == 3) {
-			comp_names[comp_i] = strdup(comps[1]);
 			info = &infos[comp_i++];
 			info->type = ELEC_GEN;
+			info->name = strdup(comps[1]);
 			info->gen.ac = (strcmp(comps[2], "AC") == 0);
 		} else if (strcmp(cmd, "TRU") == 0 && n_comps == 2) {
-			comp_names[comp_i] = strdup(comps[1]);
 			info = &infos[comp_i++];
 			info->type = ELEC_TRU;
+			info->name = strdup(comps[1]);
 		} else if (strcmp(cmd, "LOAD") == 0 && n_comps == 2) {
-			comp_names[comp_i] = strdup(comps[1]);
 			info = &infos[comp_i++];
 			info->type = ELEC_LOAD;
-		} else if (strcmp(cmd, "BUS") == 0 && n_comps == 2) {
-			comp_names[comp_i] = strdup(comps[1]);
+			info->name = strdup(comps[1]);
+		} else if (strcmp(cmd, "BUS") == 0 && n_comps == 3) {
 			info = &infos[comp_i++];
 			info->type = ELEC_BUS;
+			info->name = strdup(comps[1]);
+			info->bus.ac = (strcmp(comps[2], "AC") == 0);
 		} else if (strcmp(cmd, "CB") == 0 && n_comps == 2) {
-			comp_names[comp_i] = strdup(comps[1]);
 			info = &infos[comp_i++];
 			info->type = ELEC_CB;
+			info->name = strdup(comps[1]);
 		} else if (strcmp(cmd, "TIE") == 0 && n_comps == 2) {
-			comp_names[comp_i] = strdup(comps[1]);
 			info = &infos[comp_i++];
 			info->type = ELEC_TIE;
+			info->name = strdup(comps[1]);
 		} else if (strcmp(cmd, "DIODE") == 0 && n_comps == 2) {
-			comp_names[comp_i] = strdup(comps[1]);
 			info = &infos[comp_i++];
 			info->type = ELEC_DIODE;
+			info->name = strdup(comps[1]);
 		} else if (strcmp(cmd, "VOLTS") == 0 && n_comps == 2 &&
 		    info != NULL) {
 			if (info->type == ELEC_BATT)
@@ -466,6 +586,24 @@ libelec_infos_parse(const char *filename, elec_func_bind_t *binds,
 				info->gen.volts = atof(comps[1]);
 			else
 				INVALID_LINE_FOR_COMP_TYPE;
+		} else if (strcmp(cmd, "IN_VOLTS") == 0 && n_comps == 2 &&
+		    info != NULL && info->type == ELEC_TRU) {
+			info->tru.in_volts = atof(comps[1]);
+		} else if (strcmp(cmd, "OUT_VOLTS") == 0 && n_comps == 2 &&
+		    info != NULL && info->type == ELEC_TRU) {
+			info->tru.out_volts = atof(comps[1]);
+		} else if (strcmp(cmd, "MIN_VOLTS") == 0 && n_comps == 2 &&
+		    info != NULL && info->type == ELEC_LOAD) {
+			info->load.min_volts = atof(comps[1]);
+		} else if (strcmp(cmd, "INPUT_CAP") == 0 && n_comps == 2 &&
+		    info != NULL && info->type == ELEC_LOAD) {
+			info->load.input_cap = atof(comps[1]);
+		} else if (strcmp(cmd, "CAPACITY") == 0 && n_comps == 2 &&
+		    info != NULL && info->type == ELEC_BATT) {
+			info->batt.capacity = atof(comps[1]);
+		} else if (strcmp(cmd, "STAB") == 0 && n_comps == 2 &&
+		    info != NULL && info->type == ELEC_LOAD) {
+			info->load.stab = (strcmp(comps[1], "TRUE") == 0);
 		} else if (strcmp(cmd, "STAB_RATE") == 0 && n_comps == 2 &&
 		    info != NULL && info->type == ELEC_GEN) {
 			info->gen.stab_rate = atof(comps[1]);
@@ -475,6 +613,9 @@ libelec_infos_parse(const char *filename, elec_func_bind_t *binds,
 		} else if (strcmp(cmd, "MAX_RPM") == 0 && n_comps == 2 &&
 		    info != NULL && info->type == ELEC_GEN) {
 			info->gen.max_rpm = atof(comps[1]);
+		} else if (strcmp(cmd, "MAX_AMPS") == 0 && n_comps == 2 &&
+		    info != NULL && info->type == ELEC_CB) {
+			info->cb.max_amps = atof(comps[1]);
 		} else if (strcmp(cmd, "MAX_PWR") == 0 && n_comps == 2 &&
 		    info != NULL) {
 			if (info->type == ELEC_BATT)
@@ -490,13 +631,12 @@ libelec_infos_parse(const char *filename, elec_func_bind_t *binds,
 			vect2_t **curve_pp;
 			size_t num;
 
-			if (info->type == ELEC_GEN) {
+			if (info->type == ELEC_GEN)
 				curve_pp = &info->gen.eff_curve;
-			} else if (info->type = ELEC_TRU) {
+			else if (info->type == ELEC_TRU)
 				curve_pp = &info->tru.eff_curve;
-			} else {
+			else
 				INVALID_LINE_FOR_COMP_TYPE;
-			}
 			if (*curve_pp != NULL) {
 				for (vect2_t *curve = *curve_pp;
 				    !IS_NULL_VECT(*curve); curve++)
@@ -504,7 +644,7 @@ libelec_infos_parse(const char *filename, elec_func_bind_t *binds,
 			} else {
 				num = 0;
 			}
-			*curve_pp = realloc(*curve_pp,
+			*curve_pp = safe_realloc(*curve_pp,
 			    (num + 2) * sizeof (vect2_t));
 			(*curve_pp)[num] =
 			    VECT2(atof(comps[2]), atof(comps[3]));
@@ -533,35 +673,60 @@ libelec_infos_parse(const char *filename, elec_func_bind_t *binds,
 					free_strlist(comps, n_comps);
 					goto errout;
 				}
+			} else if (info->type == ELEC_LOAD) {
+				if (strcmp(comps[1], "get_load") == 0) {
+					GET_USERPTR(info->load.get_load);
+				} else if (strcmp(comps[1], "userinfo") == 0) {
+					GET_USERPTR(info->load.userinfo);
+				} else {
+					logMsg("%s:%d: invalid USERPTR type %s",
+					    filename, linenum, comps[1]);
+					free_strlist(comps, n_comps);
+					goto errout;
+				}
 			} else {
 				INVALID_LINE_FOR_COMP_TYPE;
+			}
+		} else if (strcmp(cmd, "ENDPT") == 0 && info != NULL &&
+		    info->type == ELEC_BUS && (n_comps == 2 || n_comps == 3)) {
+			elec_comp_info_t *info2 =
+			    find_comp_info(infos, num_comps, comps[1]);
+
+			if (info2 == NULL) {
+				logMsg("%s:%d: unknown component %s",
+				    filename, linenum, comps[1]);
+				free_strlist(comps, n_comps);
+				goto errout;
+			}
+			if (!add_info_link(info, info2,
+			    (n_comps == 3 ? comps[2] : NULL)) ||
+			    !add_info_link(info2, info,
+			    (n_comps == 3 ? comps[2] : NULL))) {
+				logMsg("%s:%d: bad component link line",
+				    filename, linenum);
+				free_strlist(comps, n_comps);
+				goto errout;
 			}
 		} else {
 			logMsg("%s:%d: unknown or malformed line",
 			    filename, linenum);
+			free_strlist(comps, n_comps);
+			goto errout;
 		}
 		free_strlist(comps, n_comps);
 	}
 
 #undef	INVALID_LINE_FOR_COMP_TYPE
-#undef	GET_USERPTR(field)
+#undef	GET_USERPTR
 
 	fclose(fp);
 	free(line);
-	for (size_t i = 0; i < num_comps; i++)
-		free(comp_names[i]);
-	free(comp_names);
-
 	*num_infos = num_comps;
 
 	return (infos);
 errout:
 	fclose(fp);
 	free(line);
-	for (size_t i = 0; i < num_comps; i++)
-		free(comp_names[i]);
-	free(comp_names);
-
 	*num_infos = 0;
 
 	return (NULL);
@@ -574,28 +739,94 @@ libelec_parsed_info_free(elec_comp_info_t *infos, size_t num_infos)
 	for (size_t i = 0; i < num_infos; i++) {
 		elec_comp_info_t *info = &infos[i];
 
-		switch (infos->type) {
-		case ELEC_GEN:
+		free(info->name);
+		if (info->type == ELEC_GEN)
 			free(info->gen.eff_curve);
-			break;
-		case ELEC_TRU:
+		else if (info->type == ELEC_TRU)
 			free(info->tru.eff_curve);
-			break;
-		case ELEC_BUS:
+		else if (info->type == ELEC_BUS)
 			free(info->bus.comps);
-			break;
-		default:
-			break;
-		}
 	}
 	free(infos);
 }
 
+void
+libelec_walk_comps(elec_sys_t *sys, void (*cb)(elec_comp_t *, void*),
+    void *userinfo)
+{
+	ASSERT(sys != NULL);
+	ASSERT(cb != NULL);
+	/* userinfo can be NULL */
+
+	/*
+	 * The component list is immutable, so we can walk it without
+	 * holding the lock. But the callback might be changing system
+	 * state, so we'll grab the lock before any manipulation can occur.
+	 */
+	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
+	    comp = list_next(&sys->comps, comp)) {
+		mutex_enter(&sys->lock);
+		cb(comp, userinfo);
+		mutex_exit(&sys->lock);
+	}
+}
+
+elec_comp_t *
+libelec_info2comp(const elec_sys_t *sys, const elec_comp_info_t *info)
+{
+	ASSERT(info != NULL);
+
+	/* The component list is immutable, so no locking is required */
+	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
+	    comp = list_next(&sys->comps, comp)) {
+		if (comp->info == info)
+			return (comp);
+	}
+
+	return (NULL);
+}
+
 const elec_comp_info_t *
-libelec_comp_get_info(const elec_comp_t *comp)
+libelec_comp2info(const elec_comp_t *comp)
 {
 	ASSERT(comp != NULL);
+	/* immutable binding */
 	return (comp->info);
+}
+
+elec_comp_t *
+libelec_comp_get_src(const elec_comp_t *comp)
+{
+	ASSERT(comp != NULL);
+	return (comp->src);
+}
+
+double
+libelec_comp_get_in_volts(const elec_comp_t *comp)
+{
+	ASSERT(comp != NULL);
+	return (comp->in_volts);
+}
+
+double
+libelec_comp_get_out_volts(const elec_comp_t *comp)
+{
+	ASSERT(comp != NULL);
+	return (comp->out_volts);
+}
+
+double
+libelec_comp_get_in_amps(const elec_comp_t *comp)
+{
+	ASSERT(comp != NULL);
+	return (comp->in_amps);
+}
+
+double
+libelec_comp_get_out_amps(const elec_comp_t *comp)
+{
+	ASSERT(comp != NULL);
+	return (comp->out_amps);
 }
 
 static void
@@ -614,7 +845,7 @@ network_reset(elec_sys_t *sys)
 	}
 }
 
-static double
+static void
 network_update_gen(elec_comp_t *gen, double d_t)
 {
 	double rpm, stab_factor;
@@ -624,7 +855,7 @@ network_update_gen(elec_comp_t *gen, double d_t)
 	ASSERT3U(gen->info->type, ==, ELEC_GEN);
 	ASSERT(gen->info->gen.get_rpm != NULL);
 
-	rpm = gen->info->gen.get_rpm(comp);
+	rpm = gen->info->gen.get_rpm(gen);
 	ASSERT(!isnan(rpm));
 	rpm = MAX(rpm, 1);
 	/*
@@ -671,9 +902,9 @@ network_update_batt(elec_comp_t *batt, double d_t)
 	ASSERT(batt != NULL);
 	ASSERT(batt->info != NULL);
 	ASSERT3U(batt->info->type, ==, ELEC_BATT);
-	ASSERT(batt->info->get_temp != NULL);
+	ASSERT(batt->info->batt.get_temp != NULL);
 
-	T = batt->info->get_temp(comp);
+	T = batt->info->batt.get_temp(batt);
 	ASSERT3F(T, >, 0);
 	temp_coeff = fx_lin_multi(T, temp_energy_curve, B_TRUE);
 
@@ -749,7 +980,7 @@ network_paint_src_tie(elec_comp_t *src, elec_comp_t *upstream,
 	/* Check if the upstream bus is currently tied */
 	for (unsigned i = 0; i < comp->tie.n_buses; i++) {
 		if (upstream == comp->tie.buses[i]) {
-			if (comp->tie.status[i]) {
+			if (comp->tie.state[i]) {
 				if (comp->in_volts < src->out_volts) {
 					comp->src = src;
 					comp->upstream = upstream;
@@ -765,7 +996,7 @@ network_paint_src_tie(elec_comp_t *src, elec_comp_t *upstream,
 	if (tied) {
 		for (unsigned i = 0; i < comp->tie.n_buses; i++) {
 			if (upstream != comp->tie.buses[i] &&
-			    comp->tie.status[i]) {
+			    comp->tie.state[i]) {
 				network_paint_src_comp(src, comp,
 				    comp->tie.buses[i], depth + 1);
 			}
@@ -811,12 +1042,14 @@ network_paint_src_cb(elec_comp_t *src, elec_comp_t *upstream,
 		comp->src = src;
 		comp->upstream = upstream;
 		comp->in_volts = src->out_volts;
-		if (upstream == elec->cb.sides[0]) {
-			network_paint_src_comp(src, comp, elec->cb.sides[1],
+		if (upstream == comp->cb.sides[0]) {
+			ASSERT(comp->cb.sides[1] != NULL);
+			network_paint_src_comp(src, comp, comp->cb.sides[1],
 			    depth + 1);
 		} else {
-			ASSERT3P(upstream, ==, elec->cb.sides[1]);
-			network_paint_src_comp(src, comp, elec->cb.sides[0],
+			ASSERT3P(upstream, ==, comp->cb.sides[1]);
+			ASSERT(comp->cb.sides[0] != NULL);
+			network_paint_src_comp(src, comp, comp->cb.sides[0],
 			    depth + 1);
 		}
 	}
@@ -838,7 +1071,8 @@ network_paint_src_diode(elec_comp_t *src, elec_comp_t *upstream,
 		comp->src = src;
 		comp->upstream = upstream;
 		comp->in_volts = src->out_volts;
-		network_paint_src_comp(src, comp, elec->cb.sides[1], depth + 1);
+		network_paint_src_comp(src, comp, comp->diode.sides[1],
+		    depth + 1);
 	}
 }
 
@@ -860,9 +1094,9 @@ network_paint_src_comp(elec_comp_t *src, elec_comp_t *upstream,
 		break;
 	case ELEC_BUS:
 		if (src->info->type == ELEC_BATT || src->info->type == ELEC_TRU)
-			ASSERT(!comp->bus.ac);
+			ASSERT(!comp->info->bus.ac);
 		else
-			ASSERT3U(comp->gen.ac, ==, comp->bus.ac);
+			ASSERT3U(comp->info->gen.ac, ==, comp->info->bus.ac);
 		network_paint_src_bus(src, upstream, comp, depth);
 		break;
 	case ELEC_TRU:
@@ -880,6 +1114,9 @@ network_paint_src_comp(elec_comp_t *src, elec_comp_t *upstream,
 		break;
 	case ELEC_TIE:
 		network_paint_src_tie(src, upstream, comp, depth);
+		break;
+	case ELEC_DIODE:
+		network_paint_src_diode(src, upstream, comp, depth);
 		break;
 	}
 }
@@ -899,7 +1136,7 @@ network_paint_src(elec_sys_t *sys, elec_comp_t *comp)
 	else
 		bus = comp->gen.bus;
 	ASSERT(bus != NULL);
-	network_paint_src_comp(sys, comp, comp, bus, 0);
+	network_paint_src_comp(comp, bus, bus, 0);
 }
 
 static void
@@ -917,11 +1154,10 @@ network_paint(elec_sys_t *sys)
 }
 
 static void
-network_load_integrate_tru(elec_comp_t *src, elec_comp_t *comp, unsigned depth)
+network_load_integrate_tru(elec_comp_t *comp, unsigned depth)
 {
 	double eff;
 
-	ASSERT(src != NULL);
 	ASSERT(comp != NULL);
 	ASSERT(comp->tru.ac != NULL);
 	ASSERT(comp->tru.dc != NULL);
@@ -930,7 +1166,7 @@ network_load_integrate_tru(elec_comp_t *src, elec_comp_t *comp, unsigned depth)
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
 	/* When hopping over to the DC network, the TRU becomes the src */
-	network_load_integrate_tru(comp, comp->tru.dc, depth + 1);
+	network_load_integrate_comp(comp, comp->tru.dc, depth + 1);
 
 	comp->out_amps = comp->tru.dc->in_amps;
 	eff = fx_lin_multi(comp->out_amps, comp->info->tru.eff_curve, B_TRUE);
@@ -943,7 +1179,7 @@ network_load_integrate_tru(elec_comp_t *src, elec_comp_t *comp, unsigned depth)
 static void
 network_load_integrate_load(elec_comp_t *comp, unsigned depth)
 {
-	double load, amps, volts;
+	double load, volts;
 
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
@@ -960,11 +1196,9 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth)
 	volts = MAX(comp->in_volts, comp->info->load.min_volts);
 	/* load is in watts */
 	if (comp->info->load.stab)
-		amps = load / volts;
+		comp->in_amps = load / volts;
 	else
-		amps = load;
-	comp->in_amps = load;
-	ASSERT(comp->bus != NULL);
+		comp->in_amps = load;
 }
 
 static void
@@ -981,8 +1215,8 @@ network_load_integrate_bus(elec_comp_t *src, elec_comp_t *comp, unsigned depth)
 	for (unsigned i = 0; i < comp->bus.n_comps; i++) {
 		ASSERT(comp->bus.comps[i] != NULL);
 		if (comp->bus.comps[i] != comp->upstream) {
-			network_load_integrate_comp(src, comp->bus.comps[i],
-			    depth + 1);
+			network_load_integrate_comp(src,
+			    comp->bus.comps[i], depth + 1);
 			amps += comp->bus.comps[i]->in_amps;
 		}
 	}
@@ -996,6 +1230,7 @@ network_load_integrate_tie(elec_comp_t *src, elec_comp_t *comp, unsigned depth)
 {
 	double amps;
 
+	ASSERT(src != NULL);
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
 	ASSERT3U(comp->info->type, ==, ELEC_TIE);
@@ -1003,10 +1238,10 @@ network_load_integrate_tie(elec_comp_t *src, elec_comp_t *comp, unsigned depth)
 
 	for (unsigned i = 0; i < comp->tie.n_buses; i++) {
 		ASSERT(comp->tie.buses[i] != NULL);
-		if (comp->tie.status[i] &&
+		if (comp->tie.state[i] &&
 		    comp->tie.buses[i] != comp->upstream) {
-			network_load_integrate_comp(src, comp->tie.buses[i],
-			    depth + 1);
+			network_load_integrate_comp(src,
+			    comp->tie.buses[i], depth + 1);
 			amps += comp->tie.buses[i]->in_amps;
 		}
 	}
@@ -1020,10 +1255,12 @@ network_load_integrate_comp(elec_comp_t *src, elec_comp_t *comp, unsigned depth)
 {
 	ASSERT(src != NULL);
 	ASSERT(src->info != NULL);
-	ASSERT(src->info->type == ELEC_BATT || src->info->type == ELEC_GEN);
+	ASSERT(src->info->type == ELEC_BATT || src->info->type == ELEC_GEN ||
+	    src->info->type == ELEC_TRU);
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
+
 	if (src == comp)
 		ASSERT0(depth);
 
@@ -1051,7 +1288,7 @@ network_load_integrate_comp(elec_comp_t *src, elec_comp_t *comp, unsigned depth)
 		network_load_integrate_load(comp, depth);
 		break;
 	case ELEC_BUS:
-		network_load_integrate_bus(comp, depth);
+		network_load_integrate_bus(src, comp, depth);
 		break;
 	case ELEC_CB:
 		if (comp->cb.set) {
@@ -1069,10 +1306,9 @@ network_load_integrate_comp(elec_comp_t *src, elec_comp_t *comp, unsigned depth)
 		comp->in_amps = comp->out_amps;
 		break;
 	case ELEC_TIE:
-		network_load_integrate_tie(comp, depth);
+		network_load_integrate_tie(src, comp, depth);
 		break;
 	case ELEC_DIODE:
-		ASSERT3P(upstream, ==, comp->diode.sides[0]);
 		network_load_integrate_comp(src, comp->diode.sides[1],
 		    depth + 1);
 		comp->out_amps = comp->diode.sides[1]->in_amps;
@@ -1122,15 +1358,11 @@ comp_free(elec_comp_t *comp)
 	ASSERT(comp != NULL);
 	ASSERT(comp->info);
 
-	switch (comp->info->type) {
-	case ELEC_BATT:
-		break;
-	case ELEC_BUS:
+	if (comp->info->type == ELEC_BUS) {
 		free(comp->bus.comps);
-		break;
-	case ELEC_TIE:
+	} else if (comp->info->type == ELEC_TIE) {
 		free(comp->tie.buses);
-		break;
+		free(comp->tie.state);
 	}
 
 	free(comp);
@@ -1171,6 +1403,43 @@ libelec_cb_get(const elec_comp_t *comp)
 	return (set);
 }
 
+void
+libelec_tie_set(elec_comp_t *comp, elec_comp_info_t *const* bus_list,
+    size_t list_len)
+{
+	elec_sys_t *sys;
+	bool_t *new_state;
+
+	ASSERT(comp != NULL);
+	ASSERT(comp->sys != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT3U(comp->info->type, ==, ELEC_TIE);
+	ASSERT(bus_list != NULL || list_len == 0);
+
+	sys = comp->sys;
+	if (list_len == 0) {
+		mutex_enter(&sys->lock);
+		memset(comp->tie.state, 0,
+		    comp->tie.n_buses * sizeof (*comp->tie.state));
+		mutex_exit(&sys->lock);
+		return;
+	}
+
+	new_state = safe_calloc(comp->tie.n_buses, sizeof (*new_state));
+	for (size_t i = 0; i < comp->tie.n_buses; i++) {
+		for (size_t j = 0; j < list_len; j++) {
+			if (comp->tie.buses[i]->info == bus_list[j]) {
+				new_state[i] = B_TRUE;
+				break;
+			}
+		}
+	}
+	mutex_enter(&sys->lock);
+	memcpy(comp->tie.state, new_state,
+	    comp->tie.n_buses * sizeof (*comp->tie.state));
+	mutex_exit(&sys->lock);
+	free(new_state);
+}
 
 void
 libelec_tie_set_all(elec_comp_t *comp, bool_t tied)
@@ -1184,8 +1453,8 @@ libelec_tie_set_all(elec_comp_t *comp, bool_t tied)
 
 	sys = comp->sys;
 	mutex_enter(&sys->lock);
-	for (unsigned i = 0; tied && i < comp->tie.n_buses; i++)
-		comp->tie.status[i] = tied;
+	for (unsigned i = 0; i < comp->tie.n_buses; i++)
+		comp->tie.state[i] = tied;
 	mutex_exit(&sys->lock);
 }
 
@@ -1203,7 +1472,7 @@ libelec_tie_get_all(const elec_comp_t *comp)
 	sys = comp->sys;
 	mutex_enter(&sys->lock);
 	for (unsigned i = 0; tied && i < comp->tie.n_buses; i++)
-		tied &= comp->tie.status[i];
+		tied &= comp->tie.state[i];
 	mutex_exit(&sys->lock);
 
 	return (tied);

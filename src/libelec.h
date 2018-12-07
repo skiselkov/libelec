@@ -42,6 +42,7 @@ typedef struct {
 	double	max_pwr;	/* max power draw in Watts */
 	/* returns the battery temperature in kelvin */
 	double	(*get_temp)(elec_comp_t *comp);
+	void	*userinfo;
 } elec_batt_info_t;
 
 typedef struct elec_gen_info_s {
@@ -52,7 +53,7 @@ typedef struct elec_gen_info_s {
 	double	max_rpm;	/* max rpm above which regulation fails */
 	double	max_pwr;	/* max power draw in Watts */
 	vect2_t	*eff_curve;	/* Watts -> efficiency curve for fx_lin_multi */
-	double	(*get_rpm)(struct elec_comp_t *comp);
+	double	(*get_rpm)(elec_comp_t *comp);
 	void	*userinfo;
 } elec_gen_info_t;
 
@@ -71,6 +72,7 @@ typedef struct {
 	double		min_volts;	/* minimum voltage to operate */
 	/* Unstabilized loads return Amps, stabilized loads return Watts. */
 	double		(*get_load)(elec_comp_t *comp);
+	void		*userinfo;
 } elec_load_info_t;
 
 typedef struct {
@@ -89,7 +91,7 @@ typedef struct {
 
 struct elec_comp_info_s {
 	elec_comp_type_t		type;
-	const char			*name;
+	char				*name;
 	void				*userinfo;
 	union {
 		elec_batt_info_t	batt;
@@ -111,14 +113,26 @@ elec_sys_t *libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos);
 void libelec_destroy(elec_sys_t *sys);
 
 elec_comp_info_t *libelec_infos_parse(const char *filename,
-    elec_func_bind_t *binds, size_t num_binds, size_t *num_infos);
+    const elec_func_bind_t *binds, size_t *num_infos);
 void libelec_parsed_info_free(elec_comp_info_t *infos, size_t num_infos);
 
-const elec_comp_info_t *libelec_comp_get_info(const elec_comp_t *comp);
+void libelec_walk_comps(elec_sys_t *sys, void (*cb)(elec_comp_t *, void*),
+    void *userinfo);
+elec_comp_t *libelec_info2comp(const elec_sys_t *sys,
+    const elec_comp_info_t *info);
+const elec_comp_info_t *libelec_comp2info(const elec_comp_t *comp);
+
+elec_comp_t *libelec_comp_get_src(const elec_comp_t *comp);
+double libelec_comp_get_in_volts(const elec_comp_t *comp);
+double libelec_comp_get_out_volts(const elec_comp_t *comp);
+double libelec_comp_get_in_amps(const elec_comp_t *comp);
+double libelec_comp_get_out_amps(const elec_comp_t *comp);
 
 void libelec_cb_set(elec_comp_t *comp, bool_t set);
 bool_t libelec_cb_get(const elec_comp_t *comp);
 
+void libelec_tie_set(elec_comp_t *comp, elec_comp_info_t *const*bus_list,
+    size_t list_len);
 void libelec_tie_set_all(elec_comp_t *comp, bool_t tied);
 bool_t libelec_tie_get_all(const elec_comp_t *comp);
 
