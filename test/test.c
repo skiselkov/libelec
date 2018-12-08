@@ -15,7 +15,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <stddef.h>
 
+#include <acfutils/avl.h>
 #include <acfutils/assert.h>
 #include <acfutils/crc64.h>
 #include <acfutils/helpers.h>
@@ -24,9 +26,16 @@
 
 #include "libelec.h"
 
+typedef struct {
+	const elec_comp_info_t	*info;
+	float			load;
+	avl_node_t		node;
+} load_info_t;
+
 static elec_sys_t *sys = NULL;
 static elec_comp_info_t *infos = NULL;
 static size_t num_infos = 0;
+static avl_tree_t load_infos;
 
 static double get_gen_rpm(elec_comp_t *comp);
 static double get_batt_temp(elec_comp_t *comp);
@@ -44,8 +53,22 @@ static elec_func_bind_t binds[] = {
     { "dc_gen", NULL },
     { "main_batt", NULL },
     { "apu_batt", NULL },
+    { "ac_bus_load_1", NULL },
+    { "ac_bus_load_2", NULL },
     { NULL, NULL }	/* list terminator */
 };
+
+static int
+load_info_compar(const void *a, const void *b)
+{
+	const load_info_t *la = a, *lb = b;
+
+	if (la->info < lb->info)
+		return (-1);
+	if (la->info > lb->info)
+		return (1);
+	return (0);
+}
 
 static void
 print_usage(FILE *fp, const char *progname)
@@ -86,26 +109,101 @@ paint_i(elec_comp_t *comp, void *userinfo)
 	elec_comp_t *src = libelec_comp_get_src(comp);
 	const elec_comp_info_t *src_info =
 	    (src != NULL ? libelec_comp2info(src) : NULL);
-	const char *src_name;
+	elec_comp_t *upstream = libelec_comp_get_upstream(comp);
+	const elec_comp_info_t *upstream_info =
+	    (upstream != NULL ? libelec_comp2info(upstream) : NULL);
+	const char *src_name, *upstream_name;
 
 	UNUSED(userinfo);
 
-	if (info->type != ELEC_BUS)
+	if (info->type != ELEC_BUS && info->type != ELEC_TRU)
 		return;
 
 	src_name = (src_info != NULL ? src_info->name : "");
-	printf("%-20s %-12s %5.1fV %5.1fA %5.1fV %5.1fA\n",
+	upstream_name = (upstream_info != NULL ? upstream_info->name : "");
+	UNUSED(upstream_name);
+	printf("%-20s %-12s %5.1fV %5.1fA %4.0fW %5.1fV %5.1fA %4.0fW\n",
 	    info->name, src_name,
 	    libelec_comp_get_in_volts(comp),
 	    libelec_comp_get_in_amps(comp),
+	    libelec_comp_get_in_pwr(comp),
 	    libelec_comp_get_out_volts(comp),
-	    libelec_comp_get_out_amps(comp));
+	    libelec_comp_get_out_amps(comp),
+	    libelec_comp_get_out_pwr(comp));
 }
 
 static void
 paint(void)
 {
+	printf(
+	    "BUS NAME             SRC            U_in   I_in  W_in  "
+	    "U_out  I_out W_out\n"
+	    "-----------------    -----------   -----  ----- -----  "
+	    "-----  ----- -----\n");
 	libelec_walk_comps(sys, paint_i, NULL);
+}
+
+static void
+print_cbs_i(elec_comp_t *comp, void *userinfo)
+{
+	const elec_comp_info_t *info = libelec_comp2info(comp);
+	elec_comp_t *src = libelec_comp_get_src(comp);
+	const elec_comp_info_t *src_info =
+	    (src != NULL ? libelec_comp2info(src) : NULL);
+	const char *src_name;
+
+	UNUSED(userinfo);
+
+	if (info->type != ELEC_CB)
+		return;
+
+	src_name = (src_info != NULL ? src_info->name : "");
+	printf("%-12s %-12s %5.1fV %5.1fA %5.2f  %3s\n",
+	    info->name, src_name,
+	    libelec_comp_get_in_volts(comp),
+	    libelec_comp_get_in_amps(comp),
+	    libelec_cb_get_temp(comp),
+	    libelec_cb_get(comp) ? "Y" : "");
+}
+
+static void
+print_cbs(void)
+{
+	printf(
+	    "CB NAME      SRC               U      I  TEMP  SET\n"
+	    "-------      ----------    -----  -----  ----  ---\n");
+	libelec_walk_comps(sys, print_cbs_i, NULL);
+}
+
+static void
+print_loads_i(elec_comp_t *comp, void *userinfo)
+{
+	const elec_comp_info_t *info = libelec_comp2info(comp);
+	elec_comp_t *src = libelec_comp_get_src(comp);
+	const elec_comp_info_t *src_info =
+	    (src != NULL ? libelec_comp2info(src) : NULL);
+	const char *src_name;
+
+	UNUSED(userinfo);
+
+	if (info->type != ELEC_LOAD)
+		return;
+
+	src_name = (src_info != NULL ? src_info->name : "");
+	printf("%-20s %-12s %5.1fV %5.1fA %6.1fW\n",
+	    info->name, src_name,
+	    libelec_comp_get_in_volts(comp),
+	    libelec_comp_get_in_amps(comp),
+	    libelec_comp_get_in_pwr(comp));
+}
+
+static void
+print_loads(void)
+{
+	printf(
+	    "NAME                                U_in   I_in    W_in\n"
+	    "------------------                 -----  -----  ------\n");
+	libelec_walk_comps(sys, print_loads_i, NULL);
 }
 
 static void
@@ -167,15 +265,46 @@ cb(void)
 	libelec_cb_set(comp, set);
 }
 
+static void
+load_cmd(void)
+{
+	char name[64];
+	elec_comp_info_t *info;
+	load_info_t srch, *load_info;
+	float load;
+	avl_index_t where;
+
+	if (scanf("%63s %f", name, &load) != 2)
+		return;
+	info = name2info(name);
+	if (info == NULL) {
+		fprintf(stderr, "Unknown load %s\n", name);
+		return;
+	}
+	srch.info = info;
+	load_info = avl_find(&load_infos, &srch, &where);
+	if (load_info == NULL) {
+		load_info = safe_calloc(1, sizeof (*load_info));
+		load_info->info = info;
+		avl_insert(&load_infos, load_info, where);
+	}
+	load_info->load = load;
+}
+
 int
 main(int argc, char **argv)
 {
 	const char *filename;
 	int opt;
 	char cmd[32];
+	void *cookie;
+	load_info_t *load_info;
 
 	crc64_init();
 	log_init(debug_print, "test");
+
+	avl_create(&load_infos, load_info_compar, sizeof (load_info_t),
+	    offsetof(load_info_t, node));
 
 	while ((opt = getopt(argc, argv, "h")) != -1) {
 		switch (opt) {
@@ -206,15 +335,26 @@ main(int argc, char **argv)
 			break;
 		if (strcmp(cmd, "p") == 0) {
 			paint();
+		} else if (strcmp(cmd, "l") == 0) {
+			print_loads();
+		} else if (strcmp(cmd, "cbs") == 0) {
+			print_cbs();
 		} else if (strcmp(cmd, "tie") == 0) {
 			tie();
 		} else if (strcmp(cmd, "cb") == 0) {
 			cb();
+		} else if (strcmp(cmd, "load") == 0) {
+			load_cmd();
 		}
 	}
 
 	libelec_destroy(sys);
 	libelec_parsed_info_free(infos, num_infos);
+
+	cookie = NULL;
+	while ((load_info = avl_destroy_nodes(&load_infos, &cookie)) != NULL)
+		free(load_info);
+	avl_destroy(&load_infos);
 
 	return (0);
 }
@@ -237,6 +377,12 @@ get_batt_temp(elec_comp_t *comp)
 static double
 get_load(elec_comp_t *comp)
 {
-	UNUSED(comp);
-	return (1);
+	load_info_t srch = { .info = libelec_comp2info(comp) };
+	load_info_t *load_info;
+
+	load_info = avl_find(&load_infos, &srch, NULL);
+	if (load_info != NULL)
+		return (load_info->load);
+
+	return (0);
 }

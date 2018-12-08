@@ -123,13 +123,18 @@ elec_comp_t *libelec_info2comp(const elec_sys_t *sys,
 const elec_comp_info_t *libelec_comp2info(const elec_comp_t *comp);
 
 elec_comp_t *libelec_comp_get_src(const elec_comp_t *comp);
+elec_comp_t *libelec_comp_get_upstream(const elec_comp_t *comp);
+
 double libelec_comp_get_in_volts(const elec_comp_t *comp);
 double libelec_comp_get_out_volts(const elec_comp_t *comp);
 double libelec_comp_get_in_amps(const elec_comp_t *comp);
 double libelec_comp_get_out_amps(const elec_comp_t *comp);
+double libelec_comp_get_in_pwr(const elec_comp_t *comp);
+double libelec_comp_get_out_pwr(const elec_comp_t *comp);
 
 void libelec_cb_set(elec_comp_t *comp, bool_t set);
 bool_t libelec_cb_get(const elec_comp_t *comp);
+double libelec_cb_get_temp(const elec_comp_t *comp);
 
 void libelec_tie_set(elec_comp_t *comp, elec_comp_info_t *const*bus_list,
     size_t list_len);
