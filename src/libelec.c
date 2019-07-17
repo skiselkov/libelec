@@ -579,6 +579,7 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 			info = &infos[comp_i++];
 			info->type = ELEC_CB;
 			info->name = strdup(comps[1]);
+			info->cb.rate = 1;
 		} else if (strcmp(cmd, "TIE") == 0 && n_comps == 2) {
 			info = &infos[comp_i++];
 			info->type = ELEC_TIE;
@@ -625,6 +626,9 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 		} else if (strcmp(cmd, "MAX_AMPS") == 0 && n_comps == 2 &&
 		    info != NULL && info->type == ELEC_CB) {
 			info->cb.max_amps = atof(comps[1]);
+		} else if (strcmp(cmd, "RATE") == 0 && n_comps == 2 &&
+		    info != NULL && info->type == ELEC_CB) {
+			info->cb.rate = clamp(atof(comps[1]), 0.001, 1000);
 		} else if (strcmp(cmd, "MAX_PWR") == 0 && n_comps == 2 &&
 		    info != NULL) {
 			if (info->type == ELEC_BATT)
@@ -956,7 +960,7 @@ network_update_batt(elec_comp_t *batt, double d_t)
 static void
 network_update_cb(elec_comp_t *cb, double d_t)
 {
-	double amps_rat, rate;
+	double amps_rat;
 
 	ASSERT(cb != NULL);
 	ASSERT(cb->info != NULL);
@@ -964,8 +968,7 @@ network_update_cb(elec_comp_t *cb, double d_t)
 	ASSERT3F(cb->info->cb.max_amps, >, 0);
 
 	amps_rat = cb->out_amps / cb->info->cb.max_amps;
-	rate = (1.0 / MAX(amps_rat, 0.2));
-	FILTER_IN(cb->cb.temp, amps_rat, d_t, rate);
+	FILTER_IN(cb->cb.temp, amps_rat, d_t, cb->info->cb.rate);
 
 	if (cb->cb.temp >= 1.0)
 		cb->cb.set = B_FALSE;

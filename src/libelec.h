@@ -83,6 +83,7 @@ typedef struct {
 
 typedef struct {
 	double			max_amps;
+	double			rate;		/* heating rate */
 } elec_cb_info_t;
 
 typedef struct {
