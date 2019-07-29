@@ -69,6 +69,7 @@ typedef struct {
 typedef struct {
 	bool_t		stab;		/* Stabilized PSU, or const-current? */
 	double		input_cap;	/* Input capacitance in Coulomb */
+	bool_t		ac;		/* Needs AC or DC input? */
 	double		min_volts;	/* minimum voltage to operate */
 	/* Unstabilized loads return Amps, stabilized loads return Watts. */
 	double		(*get_load)(elec_comp_t *comp);

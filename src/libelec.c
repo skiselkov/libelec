@@ -173,6 +173,7 @@ resolve_bus_links(elec_sys_t *sys, elec_comp_t *bus)
 			}
 			break;
 		case ELEC_LOAD:
+			ASSERT3U(bus->info->bus.ac, ==, comp->info->load.ac);
 			comp->load.bus = bus;
 			break;
 		case ELEC_BUS:
@@ -184,7 +185,9 @@ resolve_bus_links(elec_sys_t *sys, elec_comp_t *bus)
 			if (comp->cb.sides[0] == NULL) {
 				comp->cb.sides[0] = bus;
 			} else {
-				ASSERT3P(comp->cb.sides[1], ==, NULL);
+				ASSERT_MSG(comp->cb.sides[1] == NULL,
+				    "Too many connections to %s",
+				    comp->info->name);
 				comp->cb.sides[1] = bus;
 			}
 			break;
@@ -521,8 +524,11 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 		    strncmp(line, "BUS ", 4) == 0 ||
 		    strncmp(line, "CB ", 3) == 0 ||
 		    strncmp(line, "TIE ", 4) == 0 ||
-		    strncmp(line, "DIODE ", 6) == 0)
+		    strncmp(line, "DIODE ", 6) == 0) {
 			num_comps++;
+		} else if (strncmp(line, "LOADCB ", 7) == 0) {
+			num_comps += 2;
+		}
 	}
 	rewind(fp);
 
@@ -550,41 +556,71 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 			goto errout; \
 		} \
 	} while (0)
+#define	CHECK_DUP_NAME(__name__) \
+	do { \
+		if (find_comp_info(infos, comp_i, (__name__)) != NULL) { \
+			logMsg("%s:%d: duplicate component name %s", \
+			    filename, linenum, (__name__)); \
+			free_strlist(comps, n_comps); \
+			goto errout; \
+		} \
+	} while (0)
 
 		comps = strsplit(line, " ", B_TRUE, &n_comps);
 		cmd = comps[0];
 		if (strcmp(cmd, "BATT") == 0 && n_comps == 2) {
+			ASSERT3U(comp_i, <, num_comps);
+			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
 			info->type = ELEC_BATT;
 			info->name = strdup(comps[1]);
 		} else if (strcmp(cmd, "GEN") == 0 && n_comps == 3) {
+			ASSERT3U(comp_i, <, num_comps);
+			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
 			info->type = ELEC_GEN;
 			info->name = strdup(comps[1]);
 			info->gen.ac = (strcmp(comps[2], "AC") == 0);
 		} else if (strcmp(cmd, "TRU") == 0 && n_comps == 2) {
+			ASSERT3U(comp_i, <, num_comps);
+			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
 			info->type = ELEC_TRU;
 			info->name = strdup(comps[1]);
-		} else if (strcmp(cmd, "LOAD") == 0 && n_comps == 2) {
+		} else if (strcmp(cmd, "LOAD") == 0 &&
+		    (n_comps == 2 || n_comps == 3)) {
+			ASSERT3U(comp_i, <, num_comps);
+			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
 			info->type = ELEC_LOAD;
 			info->name = strdup(comps[1]);
+			if (n_comps == 3)
+				info->load.ac = (strcmp(comps[2], "AC") == 0);
+			bind_list_find(binds, "get_load", &info->load.get_load);
 		} else if (strcmp(cmd, "BUS") == 0 && n_comps == 3) {
+			ASSERT3U(comp_i, <, num_comps);
+			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
 			info->type = ELEC_BUS;
 			info->name = strdup(comps[1]);
 			info->bus.ac = (strcmp(comps[2], "AC") == 0);
-		} else if (strcmp(cmd, "CB") == 0 && n_comps == 2) {
+		} else if (strcmp(cmd, "CB") == 0 && n_comps == 3) {
+			ASSERT3U(comp_i, <, num_comps);
+			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
 			info->type = ELEC_CB;
 			info->name = strdup(comps[1]);
 			info->cb.rate = 1;
+			info->cb.max_amps = atof(comps[2]);
 		} else if (strcmp(cmd, "TIE") == 0 && n_comps == 2) {
+			ASSERT3U(comp_i, <, num_comps);
+			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
 			info->type = ELEC_TIE;
 			info->name = strdup(comps[1]);
 		} else if (strcmp(cmd, "DIODE") == 0 && n_comps == 2) {
+			ASSERT3U(comp_i, <, num_comps);
+			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
 			info->type = ELEC_DIODE;
 			info->name = strdup(comps[1]);
@@ -623,9 +659,6 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 		} else if (strcmp(cmd, "MAX_RPM") == 0 && n_comps == 2 &&
 		    info != NULL && info->type == ELEC_GEN) {
 			info->gen.max_rpm = atof(comps[1]);
-		} else if (strcmp(cmd, "MAX_AMPS") == 0 && n_comps == 2 &&
-		    info != NULL && info->type == ELEC_CB) {
-			info->cb.max_amps = atof(comps[1]);
 		} else if (strcmp(cmd, "RATE") == 0 && n_comps == 2 &&
 		    info != NULL && info->type == ELEC_CB) {
 			info->cb.rate = clamp(atof(comps[1]), 0.001, 1000);
@@ -720,6 +753,24 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 				free_strlist(comps, n_comps);
 				goto errout;
 			}
+		} else if (strcmp(cmd, "LOADCB") == 0 && n_comps == 2 &&
+		    info != NULL && info->type == ELEC_LOAD) {
+			elec_comp_info_t *cb, *bus;
+
+			ASSERT3U(comp_i + 1, <, num_comps);
+			cb = &infos[comp_i++];
+			cb->type = ELEC_CB;
+			cb->name = sprintf_alloc("CB_%s", info->name);
+			cb->cb.rate = 1;
+			cb->cb.max_amps = atof(comps[1]);
+
+			bus = &infos[comp_i++];
+			bus->type = ELEC_BUS;
+			bus->name = sprintf_alloc("CB_BUS_%s", info->name);
+			bus->bus.ac = info->load.ac;
+
+			VERIFY(add_info_link(bus, info, NULL));
+			VERIFY(add_info_link(bus, cb, NULL));
 		} else {
 			logMsg("%s:%d: unknown or malformed line",
 			    filename, linenum);
@@ -731,6 +782,7 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 
 #undef	INVALID_LINE_FOR_COMP_TYPE
 #undef	GET_USERPTR
+#undef	CHECK_DUP_NAME
 
 	fclose(fp);
 	free(line);
