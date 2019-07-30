@@ -1,7 +1,7 @@
 /*
  * CONFIDENTIAL
  *
- * Copyright 2018 Saso Kiselkov. All rights reserved.
+ * Copyright 2019 Saso Kiselkov. All rights reserved.
  *
  * NOTICE:  All information contained herein is, and remains the property
  * of Saso Kiselkov. The intellectual and technical concepts contained
@@ -21,10 +21,36 @@
 #include <acfutils/assert.h>
 #include <acfutils/crc64.h>
 #include <acfutils/helpers.h>
+#include <acfutils/mt_cairo_render.h>
 #include <acfutils/perf.h>
 #include <acfutils/safe_alloc.h>
 
 #include "libelec.h"
+
+#define	WHITE_RGB	1, 1, 1
+#define	BLACK_RGB	0, 0, 0
+#define	LIGHT_GRAY_RGB	0.67, 0.67, 0.67
+#define	DARK_GRAY_RGB	0.33, 0.33, 0.33
+
+#define	COLOR_TABLE_SZ	16
+static const double color_table[COLOR_TABLE_SZ][3] = {
+     { 0.00, 0.00, 0.00 },
+     { 0.00, 0.00, 0.67 },
+     { 0.00, 0.67, 0.00 },
+     { 0.00, 0.67, 0.67 },
+     { 0.67, 0.00, 0.00 },
+     { 0.67, 0.00, 0.67 },
+     { 0.67, 0.33, 0.00 },
+     { 0.67, 0.67, 0.67 },
+     { 0.33, 0.33, 0.33 },
+     { 0.33, 0.33, 1.00 },
+     { 0.33, 1.00, 0.33 },
+     { 0.33, 1.00, 1.00 },
+     { 1.00, 0.33, 0.33 },
+     { 1.00, 0.33, 1.00 },
+     { 1.00, 1.00, 0.33 },
+     { 0.00, 0.33, 0.33 }
+};
 
 typedef struct {
 	const elec_comp_info_t	*info;
@@ -291,6 +317,234 @@ load_cmd(void)
 	load_info->load = load;
 }
 
+typedef struct {
+	const char	*name;
+	elec_comp_t	*comp;
+} srch_info_t;
+
+typedef struct {
+	cairo_t		*cr;
+	elec_comp_t	*upstream;
+	double		rot;	/* radians */
+} draw_info_t;
+
+static void
+find_comp(elec_comp_t *comp, void *userinfo)
+{
+	srch_info_t *info = userinfo;
+
+	if (info->comp != NULL)
+		return;
+	if (strcmp(libelec_comp2info(comp)->name, info->name) == 0)
+		info->comp = comp;
+}
+
+static void
+draw_comp_name(const elec_comp_t *comp, const draw_info_t *di)
+{
+	const char *name = libelec_comp2info(comp)->name;
+	cairo_text_extents_t te;
+	double font_sizes[] = {
+	    /* This matches the types in elec_comp_type_t */
+	    14, 14, 16, 12, 17, 12, 14, 12
+	};
+	enum { BORDER = 2 };
+
+	cairo_rotate(di->cr, -di->rot);
+
+	cairo_set_font_size(di->cr, font_sizes[libelec_comp2info(comp)->type]);
+
+	cairo_text_extents(di->cr, name, &te);
+
+	cairo_set_source_rgba(di->cr, BLACK_RGB, 0.7);
+	cairo_rectangle(di->cr, -te.width / 2 - BORDER,
+	    -te.height / 2 - BORDER, te.width + 2 * BORDER,
+	    te.height + 2 * BORDER);
+	cairo_fill(di->cr);
+
+	cairo_set_source_rgb(di->cr, WHITE_RGB);
+	cairo_move_to(di->cr, -te.width / 2 - te.x_bearing,
+	    -te.height / 2 - te.y_bearing);
+	cairo_show_text(di->cr, name);
+
+	cairo_rotate(di->cr, di->rot);
+}
+
+enum { SYMBOL_SZ = 35 };
+
+static void
+draw_bus(cairo_t *cr, double r, double g, double b)
+{
+	cairo_set_source_rgb(cr, BLACK_RGB);
+	cairo_arc(cr, 0, 0, SYMBOL_SZ, 0, DEG2RAD(360));
+	cairo_fill(cr);
+
+	cairo_set_source_rgb(cr, r, g, b);
+	cairo_arc(cr, 0, 0, SYMBOL_SZ * 0.8, 0, DEG2RAD(360));
+	cairo_fill(cr);
+}
+
+static void
+draw_cb(cairo_t *cr, double r, double g, double b)
+{
+	cairo_set_source_rgb(cr, WHITE_RGB);
+	cairo_arc(cr, 0, 0, SYMBOL_SZ / 2, 0, DEG2RAD(360));
+	cairo_fill(cr);
+
+	cairo_set_source_rgb(cr, r, g, b);
+	cairo_arc(cr, 0, 0, SYMBOL_SZ / 2, 0, DEG2RAD(360));
+	cairo_stroke(cr);
+}
+
+static void
+draw_tie(cairo_t *cr, double r, double g, double b)
+{
+	cairo_set_source_rgb(cr, r, g, b);
+	cairo_rectangle(cr, -SYMBOL_SZ / 2, -SYMBOL_SZ / 2,
+	    SYMBOL_SZ, SYMBOL_SZ);
+	cairo_fill(cr);
+
+	cairo_set_source_rgb(cr, BLACK_RGB);
+	cairo_rectangle(cr, -SYMBOL_SZ / 2, -SYMBOL_SZ / 2,
+	    SYMBOL_SZ, SYMBOL_SZ);
+	cairo_stroke(cr);
+}
+
+static void
+draw_diode(cairo_t *cr, double r, double g, double b)
+{
+	cairo_set_source_rgb(cr, r, g, b);
+	cairo_move_to(cr, -SYMBOL_SZ / 2, SYMBOL_SZ / 2);
+	cairo_rel_line_to(cr, SYMBOL_SZ, 0);
+	cairo_rel_line_to(cr, -SYMBOL_SZ / 2, -SYMBOL_SZ);
+	cairo_close_path(cr);
+	cairo_fill(cr);
+
+	cairo_set_source_rgb(cr, BLACK_RGB);
+	cairo_move_to(cr, -SYMBOL_SZ / 2, -SYMBOL_SZ / 2);
+	cairo_rel_line_to(cr, SYMBOL_SZ, 0);
+	cairo_move_to(cr, -SYMBOL_SZ / 2, SYMBOL_SZ / 2);
+	cairo_rel_line_to(cr, SYMBOL_SZ, 0);
+	cairo_rel_line_to(cr, -SYMBOL_SZ / 2, -SYMBOL_SZ);
+	cairo_close_path(cr);
+	cairo_stroke(cr);
+}
+
+static void
+draw_comp(elec_comp_t *comp, const draw_info_t *in_di, int depth)
+{
+	size_t n_conns;
+	draw_info_t di = *in_di;
+	double rot_step;
+	int idx = crc64_rand() & (COLOR_TABLE_SZ - 1);
+	const double *color = color_table[idx];
+	const elec_comp_info_t *info = libelec_comp2info(comp);
+
+	cairo_save(di.cr);
+
+	/* rotate the render so our upstream connection is on the bottom */
+	n_conns = libelec_comp_get_num_conns(comp);
+	rot_step = DEG2RAD(360) / n_conns;
+
+	for (size_t i = 0; i < n_conns; i++) {
+		if (libelec_comp_get_conn(comp, i) == di.upstream) {
+			double angle = i * rot_step;
+			double rot_incr = DEG2RAD(180) - angle +
+			    (crc64_rand_fract() - 0.5) *
+			    MIN(rot_step, DEG2RAD(20));
+
+			di.rot += rot_incr;
+			cairo_rotate(di.cr, rot_incr);
+			break;
+		}
+	}
+
+	for (size_t i = 0; i < n_conns && !info->autogen && depth < 5; i++) {
+		enum { LINE_LEN = 400 };
+		elec_comp_t *subcomp = libelec_comp_get_conn(comp, i);
+		draw_info_t ndi = di;
+
+		if (subcomp == ndi.upstream)
+			continue;
+
+		cairo_save(di.cr);
+
+		cairo_rotate(di.cr, rot_step * i);
+
+		cairo_set_source_rgb(di.cr, color[0], color[1], color[2]);
+		cairo_move_to(di.cr, 0, 0);
+		cairo_line_to(di.cr, 0, LINE_LEN);
+		cairo_stroke(di.cr);
+
+		cairo_translate(di.cr, 0, LINE_LEN);
+
+		ndi.rot += rot_step * i;
+		ndi.upstream = comp;
+		draw_comp(subcomp, &ndi, depth + 1);
+
+		cairo_restore(di.cr);
+	}
+
+	switch (info->type) {
+	case ELEC_BUS:
+		draw_bus(di.cr, color[0], color[1], color[2]);
+		break;
+	case ELEC_CB:
+		draw_cb(di.cr, color[0], color[1], color[2]);
+		break;
+	case ELEC_TIE:
+		draw_tie(di.cr, color[0], color[1], color[2]);
+		break;
+	case ELEC_DIODE:
+		draw_diode(di.cr, color[0], color[1], color[2]);
+		break;
+	default:
+		break;
+	}
+	draw_comp_name(comp, &di);
+
+	cairo_restore(di.cr);
+}
+
+static void
+dump_img(void)
+{
+	char filename[64], busname[64];
+	srch_info_t srch = { .name = busname, .comp = NULL };
+	draw_info_t di = { .cr = NULL };
+	elec_comp_t *bus;
+	cairo_surface_t *surf;
+
+	if (scanf("%63s %63s", filename, busname) != 2)
+		return;
+
+	libelec_walk_comps(sys, find_comp, &srch);
+	bus = srch.comp;
+	if (bus == NULL) {
+		logMsg("Component %s not found", busname);
+		return;
+	}
+	if (libelec_comp2info(bus)->type != ELEC_BUS) {
+		logMsg("Component %s isn't a bus", busname);
+		return;
+	}
+
+	surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 4096, 4096);
+	di.cr = cairo_create(surf);
+
+	cairo_set_source_rgb(di.cr, 1, 1, 1);
+	cairo_paint(di.cr);
+	cairo_translate(di.cr, 2048, 2048);
+	cairo_select_font_face(di.cr, "monospace", CAIRO_FONT_SLANT_NORMAL,
+	    CAIRO_FONT_WEIGHT_NORMAL);
+
+	draw_comp(bus, &di, 0);
+
+	cairo_surface_write_to_png(surf, filename);
+	cairo_destroy(di.cr);
+	cairo_surface_destroy(surf);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -301,6 +555,7 @@ main(int argc, char **argv)
 	load_info_t *load_info;
 
 	crc64_init();
+	crc64_srand(0);
 	log_init(debug_print, "test");
 
 	avl_create(&load_infos, load_info_compar, sizeof (load_info_t),
@@ -345,6 +600,8 @@ main(int argc, char **argv)
 			cb();
 		} else if (strcmp(cmd, "load") == 0) {
 			load_cmd();
+		} else if (strcmp(cmd, "dump") == 0) {
+			dump_img();
 		}
 	}
 

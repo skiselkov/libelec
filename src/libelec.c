@@ -763,11 +763,13 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 			cb->name = sprintf_alloc("CB_%s", info->name);
 			cb->cb.rate = 1;
 			cb->cb.max_amps = atof(comps[1]);
+			cb->autogen = B_TRUE;
 
 			bus = &infos[comp_i++];
 			bus->type = ELEC_BUS;
 			bus->name = sprintf_alloc("CB_BUS_%s", info->name);
 			bus->bus.ac = info->load.ac;
+			bus->autogen = B_TRUE;
 
 			VERIFY(add_info_link(bus, info, NULL));
 			VERIFY(add_info_link(bus, cb, NULL));
@@ -871,6 +873,65 @@ libelec_comp_get_upstream(const elec_comp_t *comp)
 {
 	ASSERT(comp != NULL);
 	return (comp->upstream);
+}
+
+size_t
+libelec_comp_get_num_conns(const elec_comp_t *comp)
+{
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+
+	switch (comp->info->type) {
+	case ELEC_BUS:
+		return (comp->bus.n_comps);
+	case ELEC_TIE:
+		return (comp->tie.n_buses);
+	case ELEC_TRU:
+	case ELEC_CB:
+	case ELEC_DIODE:
+		return (2);
+	default:
+		return (1);
+	}
+}
+
+elec_comp_t *
+libelec_comp_get_conn(const elec_comp_t *comp, size_t i)
+{
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+
+	switch (comp->info->type) {
+	case ELEC_BATT:
+		ASSERT0(i);
+		return (comp->batt.bus);
+	case ELEC_GEN:
+		ASSERT0(i);
+		return (comp->gen.bus);
+	case ELEC_TRU:
+		ASSERT3U(i, <, 2);
+		if (i == 0)
+			return (comp->tru.ac);
+		else
+			return (comp->tru.dc);
+	case ELEC_LOAD:
+		ASSERT0(i);
+		return (comp->load.bus);
+	case ELEC_BUS:
+		ASSERT3U(i, <, comp->bus.n_comps);
+		return (comp->bus.comps[i]);
+	case ELEC_CB:
+		ASSERT3U(i, <, 2);
+		return (comp->cb.sides[i]);
+	case ELEC_TIE:
+		ASSERT3U(i, <, comp->tie.n_buses);
+		return (comp->tie.buses[i]);
+	case ELEC_DIODE:
+		ASSERT3U(i, <, 2);
+		return (comp->cb.sides[i]);
+	default:
+		VERIFY(0);
+	}
 }
 
 double
