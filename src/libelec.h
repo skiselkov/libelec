@@ -145,6 +145,7 @@ void libelec_tie_set(elec_comp_t *comp, elec_comp_info_t *const*bus_list,
     size_t list_len);
 void libelec_tie_set_all(elec_comp_t *comp, bool_t tied);
 bool_t libelec_tie_get_all(const elec_comp_t *comp);
+size_t libelec_tie_get(const elec_comp_t *comp, elec_comp_t **bus_list);
 
 #ifdef __cplusplus
 }

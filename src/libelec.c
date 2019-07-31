@@ -1683,3 +1683,25 @@ libelec_tie_get_all(const elec_comp_t *comp)
 
 	return (tied);
 }
+
+size_t
+libelec_tie_get(const elec_comp_t *comp, elec_comp_t **bus_list)
+{
+	elec_sys_t *sys;
+	size_t n_buses = 0;
+
+	ASSERT(comp != NULL);
+	ASSERT(comp->sys != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT3U(comp->info->type, ==, ELEC_TIE);
+
+	sys = comp->sys;
+	mutex_enter(&sys->lock);
+	for (unsigned i = 0; i < comp->tie.n_buses; i++) {
+		if (comp->tie.state[i])
+			bus_list[n_buses++] = comp->tie.buses[i];
+	}
+	mutex_exit(&sys->lock);
+
+	return (n_buses);
+}

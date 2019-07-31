@@ -1,6 +1,6 @@
 # CONFIDENTIAL
 #
-# Copyright 2018 Saso Kiselkov. All rights reserved.
+# Copyright 2019 Saso Kiselkov. All rights reserved.
 #
 # NOTICE:  All information contained herein is, and remains the property
 # of Saso Kiselkov. The intellectual and technical concepts contained
@@ -13,7 +13,6 @@
 ACFUTILS=/home/diablos/NextDev/libacfutils
 
 CFLAGS = -D_GNU_SOURCE -DDEBUG -g -O0 -DIBM=0 -DAPL=0 -DLIN=1 \
-    -DLIBELEC_SLOW_DEBUG \
     -W -Wall -Werror -Wno-missing-field-initializers \
     -I../src -I$(ACFUTILS)/src \
     $(shell $(ACFUTILS)/pkg-config-deps linux-64 --cflags)

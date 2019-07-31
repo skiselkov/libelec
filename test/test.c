@@ -142,13 +142,14 @@ paint_i(elec_comp_t *comp, void *userinfo)
 
 	UNUSED(userinfo);
 
-	if (info->type != ELEC_BUS && info->type != ELEC_TRU)
+	if ((info->type != ELEC_BUS && info->type != ELEC_TRU) ||
+	    info->autogen)
 		return;
 
 	src_name = (src_info != NULL ? src_info->name : "");
 	upstream_name = (upstream_info != NULL ? upstream_info->name : "");
 	UNUSED(upstream_name);
-	printf("%-20s %-12s %5.1fV %5.1fA %4.0fW %5.1fV %5.1fA %4.0fW\n",
+	printf("%-24s %-12s %5.1fV %5.1fA %4.0fW %5.1fV %5.1fA %4.0fW\n",
 	    info->name, src_name,
 	    libelec_comp_get_in_volts(comp),
 	    libelec_comp_get_in_amps(comp),
@@ -162,9 +163,9 @@ static void
 paint(void)
 {
 	printf(
-	    "BUS NAME             SRC            U_in   I_in  W_in  "
+	    "BUS NAME                 SRC            U_in   I_in  W_in  "
 	    "U_out  I_out W_out\n"
-	    "-----------------    -----------   -----  ----- -----  "
+	    "-----------------        -----------   -----  ----- -----  "
 	    "-----  ----- -----\n");
 	libelec_walk_comps(sys, paint_i, NULL);
 }
@@ -184,7 +185,7 @@ print_cbs_i(elec_comp_t *comp, void *userinfo)
 		return;
 
 	src_name = (src_info != NULL ? src_info->name : "");
-	printf("%-12s %-12s %5.1fV %5.1fA %5.2f  %3s\n",
+	printf("%-24s %-14s %5.1fV %5.1fA %5.2f  %3s\n",
 	    info->name, src_name,
 	    libelec_comp_get_in_volts(comp),
 	    libelec_comp_get_in_amps(comp),
@@ -196,8 +197,10 @@ static void
 print_cbs(void)
 {
 	printf(
-	    "CB NAME      SRC               U      I  TEMP  SET\n"
-	    "-------      ----------    -----  -----  ----  ---\n");
+	    "CB NAME                    SRC               U      I  TEMP  "
+	    "SET\n"
+	    "-------                    ----------    -----  -----  ----  "
+	    "---\n");
 	libelec_walk_comps(sys, print_cbs_i, NULL);
 }
 
@@ -216,7 +219,7 @@ print_loads_i(elec_comp_t *comp, void *userinfo)
 		return;
 
 	src_name = (src_info != NULL ? src_info->name : "");
-	printf("%-20s %-12s %5.1fV %5.1fA %6.1fW\n",
+	printf("%-30s %-12s %5.1fV %5.1fA %6.1fW\n",
 	    info->name, src_name,
 	    libelec_comp_get_in_volts(comp),
 	    libelec_comp_get_in_amps(comp),
@@ -227,9 +230,43 @@ static void
 print_loads(void)
 {
 	printf(
-	    "NAME                                U_in   I_in    W_in\n"
-	    "------------------                 -----  -----  ------\n");
+	    "NAME                                         "
+	    " U_in   I_in    W_in\n"
+	    "------------------                           "
+	    "-----  -----  ------\n");
 	libelec_walk_comps(sys, print_loads_i, NULL);
+}
+
+static void
+print_ties_i(elec_comp_t *comp, void *userinfo)
+{
+	const elec_comp_info_t *info = libelec_comp2info(comp);
+	elec_comp_t *bus_list[libelec_comp_get_num_conns(comp)];
+	size_t n_tied;
+
+	UNUSED(userinfo);
+
+	if (info->type != ELEC_TIE)
+		return;
+
+	printf("%-25s ", info->name);
+
+	n_tied = libelec_tie_get(comp, bus_list);
+	for (size_t i = 0; i < n_tied; i++) {
+		const elec_comp_info_t *bus_info =
+		    libelec_comp2info(bus_list[i]);
+		printf("%s%s", bus_info->name, (i + 1 < n_tied) ? "," : "");
+	}
+
+	printf("\n");
+}
+
+static void
+print_ties(void)
+{
+	printf("NAME                      BUSES\n"
+	    "------------------------  ------------------\n");
+	libelec_walk_comps(sys, print_ties_i, NULL);
 }
 
 static void
@@ -545,6 +582,19 @@ dump_img(void)
 	cairo_surface_destroy(surf);
 }
 
+static void
+print_help(void)
+{
+	printf("p - print buses\n"
+	    "l - print loads\n"
+	    "cbs - print circuit breakers\n"
+	    "cb <CB_NAME> <0|1> - sets/resets a circuit breaker\n"
+	    "ties - print ties\n"
+	    "tie <TIE_NAME> <BUS1,BUS2,...> - tie buses together\n"
+	    "load <LOAD_NAME> <WATTS> - configures a constant load\n"
+	    "dump <filename.png> <BUS_NAME> - dump image of network at bus\n");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -594,6 +644,8 @@ main(int argc, char **argv)
 			print_loads();
 		} else if (strcmp(cmd, "cbs") == 0) {
 			print_cbs();
+		} else if (strcmp(cmd, "ties") == 0) {
+			print_ties();
 		} else if (strcmp(cmd, "tie") == 0) {
 			tie();
 		} else if (strcmp(cmd, "cb") == 0) {
@@ -602,6 +654,11 @@ main(int argc, char **argv)
 			load_cmd();
 		} else if (strcmp(cmd, "dump") == 0) {
 			dump_img();
+		} else if (strcmp(cmd, "help") == 0) {
+			print_help();
+		} else {
+			fprintf(stderr, "Unknown command: \"%s\". "
+			    "Try \"help\"\n", cmd);
 		}
 	}
 
