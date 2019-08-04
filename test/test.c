@@ -219,11 +219,13 @@ print_loads_i(elec_comp_t *comp, void *userinfo)
 		return;
 
 	src_name = (src_info != NULL ? src_info->name : "");
-	printf("%-30s %-12s %5.1fV %5.1fA %6.1fW\n",
+	printf("%-30s %-12s %6.1fV %5.1fA %6.1fW %6.1fV %5.1fA\n",
 	    info->name, src_name,
-	    libelec_comp_get_in_volts(comp),
-	    libelec_comp_get_in_amps(comp),
-	    libelec_comp_get_in_pwr(comp));
+	    libelec_comp_get_out_volts(comp),
+	    libelec_comp_get_out_amps(comp),
+	    libelec_comp_get_out_pwr(comp),
+	    libelec_comp_get_incap_volts(comp),
+	    libelec_comp_get_in_amps(comp));
 }
 
 static void
@@ -231,9 +233,9 @@ print_loads(void)
 {
 	printf(
 	    "NAME                                         "
-	    " U_in   I_in    W_in\n"
+	    " U_out  I_out   W_out  U_c_in   I_in\n"
 	    "------------------                           "
-	    "-----  -----  ------\n");
+	    "------  -----  ------  ------  -----\n");
 	libelec_walk_comps(sys, print_loads_i, NULL);
 }
 
@@ -656,6 +658,10 @@ main(int argc, char **argv)
 			dump_img();
 		} else if (strcmp(cmd, "help") == 0) {
 			print_help();
+#ifdef	LIBELEC_SLOW_DEBUG
+		} else if (strcmp(cmd, "s") == 0) {
+			libelec_step(sys);
+#endif	/* LIBELEC_SLOW_DEBUG */
 		} else {
 			fprintf(stderr, "Unknown command: \"%s\". "
 			    "Try \"help\"\n", cmd);
@@ -678,7 +684,7 @@ static double
 get_gen_rpm(elec_comp_t *comp)
 {
 	UNUSED(comp);
-	return (2000);
+	return (100);
 }
 
 static double

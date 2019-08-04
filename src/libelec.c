@@ -66,8 +66,7 @@ typedef struct {
 	/* Change of input capacitor charge */
 	double		incap_d_Q;
 
-	double		in_volts;
-	double		in_amps;
+	bool_t		seen;
 } elec_load_t;
 
 typedef struct {
@@ -105,8 +104,6 @@ struct elec_comp_s {
 	elec_comp_t		*src;
 	elec_comp_t		*upstream;
 
-	bool_t			seen;
-
 	union {
 		elec_batt_t	batt;
 		elec_gen_t	gen;
@@ -136,6 +133,8 @@ static void network_paint_src_comp(elec_comp_t *src, elec_comp_t *upstream,
     elec_comp_t *comp, unsigned depth);
 static void network_load_integrate_comp(const elec_comp_t *src,
     const elec_comp_t *upstream, elec_comp_t *comp, unsigned depth,
+    double d_t);
+static void network_load_integrate_load(elec_comp_t *comp, unsigned depth,
     double d_t);
 
 static int
@@ -399,8 +398,10 @@ libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos)
 			 * Stabilized loads MUST declare a minimum voltage.
 			 * Non-stabilized loads don't need to.
 			 */
-			ASSERT(comp->info->load.min_volts > 0 ||
-			    !comp->info->load.stab);
+			ASSERT_MSG(comp->info->load.min_volts > 0 ||
+			    !comp->info->load.stab, "Load %s must declare "
+			    "a minimum voltage for a stabilized PSU",
+			    comp->info->name);
 			ASSERT(comp->info->load.get_load != NULL);
 			ASSERT3F(comp->info->load.incap_C, >=, 0);
 			if (comp->info->load.incap_C > 0)
@@ -429,8 +430,7 @@ libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos)
 	worker_init(&sys->worker, elec_sys_worker, EXEC_INTVAL, sys,
 	    "elec_sys");
 #else	/* !LIBELEC_SLOW_DEBUG */
-	worker_init(&sys->worker, elec_sys_worker, 20 * EXEC_INTVAL, sys,
-	    "elec_sys");
+	worker_init(&sys->worker, elec_sys_worker, 0, sys, "elec_sys");
 #endif	/* !LIBELEC_SLOW_DEBUG */
 
 	return (sys);
@@ -469,6 +469,17 @@ libelec_destroy(elec_sys_t *sys)
 
 	free(sys);
 }
+
+#ifdef	LIBELEC_SLOW_DEBUG
+
+void
+libelec_step(elec_sys_t *sys)
+{
+	ASSERT(sys != NULL);
+	worker_wake_up(&sys->worker);
+}
+
+#endif
 
 static const char*
 comp_type2str(elec_comp_type_t type)
@@ -987,6 +998,7 @@ libelec_comp_find(elec_sys_t *sys, const char *name)
 	elec_comp_t *comp;
 
 	ASSERT(sys != NULL);
+	/* Component list is immutable, no need to lock */
 	comp = avl_find(&sys->name2comp, &srch_comp, NULL);
 	VERIFY(comp != NULL);
 
@@ -1013,6 +1025,7 @@ libelec_comp_get_num_conns(const elec_comp_t *comp)
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
 
+	/* Electrical configuration is immutable, no need to lock */
 	switch (comp->info->type) {
 	case ELEC_BUS:
 		return (comp->bus.n_comps);
@@ -1033,6 +1046,7 @@ libelec_comp_get_conn(const elec_comp_t *comp, size_t i)
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
 
+	/* Electrical configuration is immutable, no need to lock */
 	switch (comp->info->type) {
 	case ELEC_BATT:
 		ASSERT0(i);
@@ -1108,6 +1122,15 @@ libelec_comp_get_out_pwr(const elec_comp_t *comp)
 	return (comp->out_pwr);
 }
 
+double
+libelec_comp_get_incap_volts(const elec_comp_t *comp)
+{
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT3U(comp->info->type, ==, ELEC_LOAD);
+	return (comp->load.incap_U);
+}
+
 static void
 network_reset(elec_sys_t *sys)
 {
@@ -1121,6 +1144,8 @@ network_reset(elec_sys_t *sys)
 		comp->in_amps = 0;
 		comp->out_volts = 0;
 		comp->out_amps = 0;
+		if (comp->info->type == ELEC_LOAD)
+			comp->load.seen = B_FALSE;
 	}
 }
 
@@ -1261,13 +1286,22 @@ network_loads_update(elec_sys_t *sys, double d_t)
 	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
 	    comp = list_next(&sys->comps, comp)) {
 		ASSERT(comp->info != NULL);
+
+		if (comp->info->type == ELEC_CB) {
+			network_update_cb(comp, d_t);
+		} else if (comp->info->type == ELEC_LOAD) {
+			/*
+			 * If we haven't seen this component, that means we
+			 * need to run the load integration manually to take
+			 * care of input capacitance.
+			 */
+			if (!comp->load.seen)
+				network_load_integrate_load(comp, 0, d_t);
+			load_incap_update(comp, d_t);
+		}
+
 		comp->in_pwr = comp->in_volts * comp->in_amps;
 		comp->out_pwr = comp->out_volts * comp->out_amps;
-
-		if (comp->info->type == ELEC_CB)
-			network_update_cb(comp, d_t);
-		else if (comp->info->type == ELEC_LOAD)
-			load_incap_update(comp, d_t);
 	}
 }
 
@@ -1478,9 +1512,10 @@ network_paint(elec_sys_t *sys)
 	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
 	    comp = list_next(&sys->comps, comp)) {
 		ASSERT(comp->info != NULL);
-		if (comp->info->type == ELEC_BATT ||
-		    comp->info->type == ELEC_GEN)
+		if ((comp->info->type == ELEC_BATT ||
+		    comp->info->type == ELEC_GEN) && comp->out_volts != 0) {
 			network_paint_src(sys, comp);
+		}
 	}
 }
 
@@ -1516,7 +1551,7 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
 	ASSERT3U(comp->info->type, ==, ELEC_LOAD);
-	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
+	UNUSED(depth);
 
 	info = comp->info;
 
@@ -1553,7 +1588,8 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 	 * When the input voltage is greater than the input capacitance
 	 * voltage, we will be charging up the input capacitance.
 	 */
-	if (info->load.incap_C > 0 && comp->in_volts > comp->load.incap_U) {
+	if (info->load.incap_C > 0 &&
+	    comp->in_volts > comp->load.incap_U + 0.01) {
 		/*
 		 * Capacitor voltage U_c is:
 		 *
@@ -1572,11 +1608,14 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 		 * subtract it from the input voltage. We can then compute
 		 * the new capacitor voltage using a stepped algorithm:
 		 *
-		 * U_c_new = (U_in - U_c_old) * (1 - e^(-t / RC)) + U_c_old
+		 * U_c_new = U_c_old + ((U_in - U_c_old) * (1 - e^(-t / RC)))
 		 */
-		double incap_U_new = (comp->in_volts - comp->load.incap_U) *
-		    exp(-d_t / (info->load.incap_R * info->load.incap_C)) +
-		    comp->load.incap_U;
+		double U_in = comp->in_volts;
+		double U_c_old = comp->load.incap_U;
+		double R = info->load.incap_R;
+		double C = info->load.incap_C;
+		double incap_U_new = U_c_old +
+		    ((U_in - U_c_old) * (1 - exp(-d_t / (R * C))));
 		/*
 		 * Next we convert the previous and new capacitor voltages
 		 * to a total charge value and figure out the net change
@@ -1620,7 +1659,7 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 	 * will be lower than the input voltage and so no more charge can
 	 * be drawn from it.
 	 */
-	if (comp->load.incap_U > comp->in_volts) {
+	if (comp->load.incap_U > comp->in_volts && load_I > 0) {
 		/* Amount of charge requested by the load in this time step */
 		double load_Q = load_I * d_t;
 		/* Amount of charge that can be drawn from the incap */
@@ -1640,7 +1679,7 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 		 * can provide.
 		 */
 		comp->in_amps = load_Q / d_t;
-		comp->load.in_amps = load_I;
+		comp->out_amps = load_I;
 		/*
 		 * The final voltage is a mixture of the network voltage
 		 * and incap voltage, in a ratio determined by how many
@@ -1648,7 +1687,8 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 		 * the incap's voltage) vs how many came in from the
 		 * network (at the network's input voltage).
 		 */
-		comp->load.in_volts = (comp->load.incap_U * used_Q +
+		ASSERT(used_Q + load_Q != 0);
+		comp->out_volts = (comp->load.incap_U * used_Q +
 		    comp->in_volts * load_Q) / (used_Q + load_Q);
 		comp->load.incap_d_Q = -used_Q;
 	} else {
@@ -1657,10 +1697,13 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 		 * current to the network current draw.
 		 */
 		comp->in_amps = load_I + incap_I;
-		comp->load.in_amps = load_I;
-		comp->load.in_volts = comp->in_volts;
+		comp->out_amps = load_I;
+		comp->out_volts = comp->in_volts;
 		comp->load.incap_d_Q = incap_I * d_t;
 	}
+	ASSERT(!isnan(comp->out_amps));
+	ASSERT(!isnan(comp->out_volts));
+	comp->load.seen = B_TRUE;
 }
 
 static void
@@ -1930,15 +1973,17 @@ libelec_tie_set_info_list(elec_comp_t *comp,
 
 	/* The buslist is immutable, so no need to lock */
 	new_state = safe_calloc(comp->tie.n_buses, sizeof (*new_state));
-	for (size_t i = 0; i < comp->tie.n_buses; i++) {
+	for (size_t i = 0; i < list_len; i++) {
 		size_t j;
-		for (j = 0; j < list_len; j++) {
-			if (comp->tie.buses[i]->info == bus_list[j]) {
-				new_state[i] = B_TRUE;
+		for (j = 0; j < comp->tie.n_buses; j++) {
+			if (comp->tie.buses[j]->info == bus_list[i]) {
+				new_state[j] = B_TRUE;
 				break;
 			}
 		}
-		ASSERT(j != list_len);
+		ASSERT_MSG(j != comp->tie.n_buses,
+		    "Tie %s is not connected to bus %s", comp->info->name,
+		    bus_list[i]->name);
 	}
 
 	mutex_enter(&sys->lock);

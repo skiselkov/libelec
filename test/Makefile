@@ -22,6 +22,10 @@ LDFLAGS = -L$(ACFUTILS)/qmake/lin64 -lacfutils \
 
 OBJS = test.o ../src/libelec.o
 
+ifeq ($(slow),yes)
+    CFLAGS += -DLIBELEC_SLOW_DEBUG
+endif
+
 all : test
 
 test : $(OBJS)

@@ -120,6 +120,10 @@ typedef void (*elec_user_cb_t)(elec_sys_t *sys, bool_t pre, void *userinfo);
 elec_sys_t *libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos);
 void libelec_destroy(elec_sys_t *sys);
 
+#ifdef	LIBELEC_SLOW_DEBUG
+void libelec_step(elec_sys_t *sys);
+#endif
+
 elec_comp_info_t *libelec_infos_parse(const char *filename,
     const elec_func_bind_t *binds, size_t *num_infos);
 void libelec_parsed_info_free(elec_comp_info_t *infos, size_t num_infos);
@@ -147,6 +151,7 @@ double libelec_comp_get_in_amps(const elec_comp_t *comp);
 double libelec_comp_get_out_amps(const elec_comp_t *comp);
 double libelec_comp_get_in_pwr(const elec_comp_t *comp);
 double libelec_comp_get_out_pwr(const elec_comp_t *comp);
+double libelec_comp_get_incap_volts(const elec_comp_t *comp);
 
 void libelec_cb_set(elec_comp_t *comp, bool_t set);
 bool_t libelec_cb_get(const elec_comp_t *comp);
