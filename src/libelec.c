@@ -1,7 +1,7 @@
 /*
  * CONFIDENTIAL
  *
- * Copyright 2018 Saso Kiselkov. All rights reserved.
+ * Copyright 2019 Saso Kiselkov. All rights reserved.
  *
  * NOTICE:  All information contained herein is, and remains the property
  * of Saso Kiselkov. The intellectual and technical concepts contained
@@ -12,9 +12,11 @@
  * obtained from Saso Kiselkov.
  */
 
+#include <stdarg.h>
 #include <stddef.h>
 
 #include <acfutils/avl.h>
+#include <acfutils/crc64.h>
 #include <acfutils/math.h>
 #include <acfutils/list.h>
 #include <acfutils/perf.h>
@@ -31,6 +33,8 @@ struct elec_sys_s {
 	mutex_t		lock;
 
 	avl_tree_t	info2comp;
+	avl_tree_t	name2comp;
+	avl_tree_t	user_cbs;
 
 	list_t		comps;
 	list_t		gens_batts;
@@ -57,6 +61,13 @@ typedef struct {
 
 typedef struct {
 	elec_comp_t	*bus;
+	/* Virtual input capacitor voltage */
+	double		incap_U;
+	/* Change of input capacitor charge */
+	double		incap_d_Q;
+
+	double		in_volts;
+	double		in_amps;
 } elec_load_t;
 
 typedef struct {
@@ -109,14 +120,55 @@ struct elec_comp_s {
 
 	list_node_t		comps_node;
 	avl_node_t		info2comp_node;
+	avl_node_t		name2comp_node;
 };
+
+typedef struct {
+	bool_t		pre;
+	elec_user_cb_t	cb;
+	void		*userinfo;
+	avl_node_t	node;
+} user_cb_info_t;
 
 static bool_t elec_sys_worker(void *userinfo);
 static void comp_free(elec_comp_t *comp);
 static void network_paint_src_comp(elec_comp_t *src, elec_comp_t *upstream,
     elec_comp_t *comp, unsigned depth);
 static void network_load_integrate_comp(const elec_comp_t *src,
-    const elec_comp_t *upstream, elec_comp_t *comp, unsigned depth);
+    const elec_comp_t *upstream, elec_comp_t *comp, unsigned depth,
+    double d_t);
+
+static int
+user_cb_info_compar(const void *a, const void *b)
+{
+	const user_cb_info_t *ucbi_a = a, *ucbi_b = b;
+
+	if (!ucbi_a->pre && ucbi_b->pre)
+		return (-1);
+	if (ucbi_a->pre && !ucbi_b->pre)
+		return (1);
+	if (ucbi_a->cb < ucbi_b->cb)
+		return (-1);
+	if (ucbi_a->cb > ucbi_b->cb)
+		return (1);
+	if (ucbi_a->userinfo < ucbi_b->userinfo)
+		return (-1);
+	if (ucbi_a->userinfo > ucbi_b->userinfo)
+		return (1);
+	return (0);
+}
+
+static int
+name2comp_compar(const void *a, const void *b)
+{
+	const elec_comp_t *ca = a, *cb = b;
+	int res = strcmp(ca->info->name, cb->info->name);
+	if (res < 0)
+		return (-1);
+	if (res > 0)
+		return (1);
+	return (0);
+}
 
 static int
 info2comp_compar(const void *a, const void *b)
@@ -289,17 +341,26 @@ libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos)
 	    offsetof(elec_comp_t, comps_node));
 	avl_create(&sys->info2comp, info2comp_compar, sizeof (elec_comp_t),
 	    offsetof(elec_comp_t, info2comp_node));
+	avl_create(&sys->name2comp, name2comp_compar, sizeof (elec_comp_t),
+	    offsetof(elec_comp_t, name2comp_node));
+	avl_create(&sys->user_cbs, user_cb_info_compar,
+	    sizeof (user_cb_info_t), offsetof(user_cb_info_t, node));
 
 	for (size_t i = 0; i < num_infos; i++) {
 		elec_comp_t *comp = safe_calloc(1, sizeof (*comp));
 		avl_index_t where;
+		const elec_comp_info_t *info = &comp_infos[i];
 
 		comp->sys = sys;
-		comp->info = &comp_infos[i];
+		comp->info = info;
 		VERIFY_MSG(avl_find(&sys->info2comp, comp, &where) == NULL,
-		    "Duplicate elec info usage %s", comp_infos[i].name);
+		    "Duplicate elec info usage %s", info->name);
 		avl_insert(&sys->info2comp, comp, where);
 		list_insert_tail(&sys->comps, comp);
+
+		VERIFY_MSG(avl_find(&sys->name2comp, comp, &where) ==
+		    NULL, "Duplicate info name %s", info->name);
+		avl_insert(&sys->name2comp, comp, where);
 
 		/* Validate info structure */
 		switch (comp->info->type) {
@@ -341,6 +402,9 @@ libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos)
 			ASSERT(comp->info->load.min_volts > 0 ||
 			    !comp->info->load.stab);
 			ASSERT(comp->info->load.get_load != NULL);
+			ASSERT3F(comp->info->load.incap_C, >=, 0);
+			if (comp->info->load.incap_C > 0)
+				ASSERT3F(comp->info->load.incap_R, >, 0);
 			break;
 		case ELEC_BUS:
 			ASSERT(comp->info->bus.comps != NULL);
@@ -376,6 +440,7 @@ void
 libelec_destroy(elec_sys_t *sys)
 {
 	elec_comp_t *comp;
+	user_cb_info_t *ucbi;
 	void *cookie;
 
 	ASSERT(sys != NULL);
@@ -383,8 +448,20 @@ libelec_destroy(elec_sys_t *sys)
 	worker_fini(&sys->worker);
 
 	cookie = NULL;
+	while ((ucbi = avl_destroy_nodes(&sys->user_cbs, &cookie)) != NULL)
+		free(ucbi);
+	avl_destroy(&sys->user_cbs);
+
+	cookie = NULL;
 	while (avl_destroy_nodes(&sys->info2comp, &cookie) != NULL)
 		;
+	avl_destroy(&sys->info2comp);
+
+	cookie = NULL;
+	while (avl_destroy_nodes(&sys->name2comp, &cookie) != NULL)
+		;
+	avl_destroy(&sys->info2comp);
+
 	while ((comp = list_remove_head(&sys->comps)) != NULL)
 		comp_free(comp);
 	list_destroy(&sys->comps);
@@ -641,9 +718,10 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 		} else if (strcmp(cmd, "MIN_VOLTS") == 0 && n_comps == 2 &&
 		    info != NULL && info->type == ELEC_LOAD) {
 			info->load.min_volts = atof(comps[1]);
-		} else if (strcmp(cmd, "INPUT_CAP") == 0 && n_comps == 2 &&
+		} else if (strcmp(cmd, "INCAP") == 0 && n_comps == 3 &&
 		    info != NULL && info->type == ELEC_LOAD) {
-			info->load.input_cap = atof(comps[1]);
+			info->load.incap_C = atof(comps[1]);
+			info->load.incap_R = atof(comps[2]);
 		} else if (strcmp(cmd, "CAPACITY") == 0 && n_comps == 2 &&
 		    info != NULL && info->type == ELEC_BATT) {
 			info->batt.capacity = atof(comps[1]);
@@ -818,6 +896,46 @@ libelec_parsed_info_free(elec_comp_info_t *infos, size_t num_infos)
 }
 
 void
+libelec_add_user_cb(elec_sys_t *sys, bool_t pre, elec_user_cb_t cb,
+    void *userinfo)
+{
+	user_cb_info_t *info = safe_calloc(1, sizeof (*info));
+	avl_index_t where;
+
+	ASSERT(sys != NULL);
+	ASSERT(cb != NULL);
+
+	info->pre = !!pre;
+	info->cb = cb;
+	info->userinfo = userinfo;
+
+	mutex_enter(&sys->lock);
+	VERIFY3P(avl_find(&sys->user_cbs, info, &where), ==, NULL);
+	avl_insert(&sys->user_cbs, info, where);
+	mutex_exit(&sys->lock);
+}
+
+void
+libelec_remove_user_cb(elec_sys_t *sys, bool_t pre, elec_user_cb_t cb,
+    void *userinfo)
+{
+	user_cb_info_t srch, *info;
+
+	ASSERT(sys != NULL);
+	ASSERT(cb != NULL);
+
+	srch.pre = !!pre;
+	srch.cb = cb;
+	srch.userinfo = userinfo;
+
+	mutex_enter(&sys->lock);
+	info = avl_find(&sys->user_cbs, &srch, NULL);
+	VERIFY(info != NULL);
+	avl_remove(&sys->user_cbs, info);
+	mutex_exit(&sys->lock);
+}
+
+void
 libelec_walk_comps(elec_sys_t *sys, void (*cb)(elec_comp_t *, void*),
     void *userinfo)
 {
@@ -859,6 +977,20 @@ libelec_comp2info(const elec_comp_t *comp)
 	ASSERT(comp != NULL);
 	/* immutable binding */
 	return (comp->info);
+}
+
+elec_comp_t *
+libelec_comp_find(elec_sys_t *sys, const char *name)
+{
+	const elec_comp_info_t srch_info = { .name = (char *)name };
+	const elec_comp_t srch_comp = { .info = &srch_info };
+	elec_comp_t *comp;
+
+	ASSERT(sys != NULL);
+	comp = avl_find(&sys->name2comp, &srch_comp, NULL);
+	VERIFY(comp != NULL);
+
+	return (comp);
 }
 
 elec_comp_t *
@@ -1104,6 +1236,23 @@ network_srcs_update(elec_sys_t *sys, double d_t)
 }
 
 static void
+load_incap_update(elec_comp_t *comp, double d_t)
+{
+	const elec_comp_info_t *info;
+
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT3U(comp->info->type, ==, ELEC_LOAD);
+	ASSERT3F(d_t, >, 0);
+
+	info = comp->info;
+	if (info->load.incap_C == 0)
+		return;
+
+	comp->load.incap_U += comp->load.incap_d_Q / info->load.incap_C;
+}
+
+static void
 network_loads_update(elec_sys_t *sys, double d_t)
 {
 	ASSERT(sys != NULL);
@@ -1117,6 +1266,8 @@ network_loads_update(elec_sys_t *sys, double d_t)
 
 		if (comp->info->type == ELEC_CB)
 			network_update_cb(comp, d_t);
+		else if (comp->info->type == ELEC_LOAD)
+			load_incap_update(comp, d_t);
 	}
 }
 
@@ -1334,7 +1485,7 @@ network_paint(elec_sys_t *sys)
 }
 
 static void
-network_load_integrate_tru(elec_comp_t *comp, unsigned depth)
+network_load_integrate_tru(elec_comp_t *comp, unsigned depth, double d_t)
 {
 	double eff;
 
@@ -1346,7 +1497,7 @@ network_load_integrate_tru(elec_comp_t *comp, unsigned depth)
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
 	/* When hopping over to the DC network, the TRU becomes the src */
-	network_load_integrate_comp(comp, comp, comp->tru.dc, depth + 1);
+	network_load_integrate_comp(comp, comp, comp->tru.dc, depth + 1, d_t);
 
 	comp->out_amps = comp->tru.dc->in_amps;
 	eff = fx_lin_multi(comp->out_amps, comp->info->tru.eff_curve, B_TRUE);
@@ -1357,35 +1508,164 @@ network_load_integrate_tru(elec_comp_t *comp, unsigned depth)
 }
 
 static void
-network_load_integrate_load(elec_comp_t *comp, unsigned depth)
+network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 {
-	double load, volts;
+	double load_WorI, load_I, in_volts_net, incap_I;
+	const elec_comp_info_t *info;
 
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
 	ASSERT3U(comp->info->type, ==, ELEC_LOAD);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
-	if (comp->in_volts > comp->info->load.min_volts) {
-		ASSERT(comp->info->load.get_load != NULL);
-		load = comp->info->load.get_load(comp);
+	info = comp->info;
+
+	/*
+	 * If the input voltage is lower than our input capacitance voltage,
+	 * it will be our input capacitance powering the load, not the input.
+	 */
+	in_volts_net = MAX(comp->in_volts, comp->load.incap_U);
+
+	/*
+	 * Only ask the load if we are receiving sufficient volts.
+	 */
+	if (in_volts_net > comp->info->load.min_volts) {
+		ASSERT(info->load.get_load != NULL);
+		load_WorI = info->load.get_load(comp);
 	} else {
-		load = 0;
+		load_WorI = 0;
 	}
-	ASSERT3F(load, >=, 0);
-	volts = MAX(comp->in_volts, comp->info->load.min_volts);
-	/* load is in watts */
-	if (comp->info->load.stab) {
+	ASSERT3F(load_WorI, >=, 0);
+
+	/*
+	 * If the load use a stabilized power supply, the load value is
+	 * in Watts. Calculate the effective current.
+	 */
+	if (info->load.stab) {
+		double volts = MAX(in_volts_net, info->load.min_volts);
 		ASSERT3F(volts, >, 0);
-		comp->in_amps = load / volts;
+		load_I = load_WorI / volts;
 	} else {
-		comp->in_amps = load;
+		load_I = load_WorI;
+	}
+
+	/*
+	 * When the input voltage is greater than the input capacitance
+	 * voltage, we will be charging up the input capacitance.
+	 */
+	if (info->load.incap_C > 0 && comp->in_volts > comp->load.incap_U) {
+		/*
+		 * Capacitor voltage U_c is:
+		 *
+		 * U_c = U_in * (1 - e^(-t / RC))
+		 *
+		 * Where:
+		 *	U_in - the input charging voltage
+		 *	t - amount of time the cap has been charging in seconds
+		 *	R - a series resistance to limit charge current in Ohms
+		 *	C - the capacitance in Farad
+		 *
+		 * Since we operate in a fixed time simulation steps, we
+		 * want to instead compute the amount of change in charge
+		 * in one simulation step. So we start with the capacitor
+		 * voltage from the previous simulation loop, U_c_old, and
+		 * subtract it from the input voltage. We can then compute
+		 * the new capacitor voltage using a stepped algorithm:
+		 *
+		 * U_c_new = (U_in - U_c_old) * (1 - e^(-t / RC)) + U_c_old
+		 */
+		double incap_U_new = (comp->in_volts - comp->load.incap_U) *
+		    exp(-d_t / (info->load.incap_R * info->load.incap_C)) +
+		    comp->load.incap_U;
+		/*
+		 * Next we convert the previous and new capacitor voltages
+		 * to a total charge value and figure out the net change
+		 * in charge.
+		 *
+		 * Q_old = U_c_old * C
+		 * Q_new = U_c_new * C
+		 * Q_delta = Q_new - Q_old
+		 *
+		 * Where Q_old and Q_new are the old and new capacitor
+		 * charge states (in Coulomb). To calculate the charge
+		 * current, we then simply divide the change in charge
+		 * Q_delta by the time quantum:
+		 *
+		 * I = Q_delta / t
+		 */
+		double Q_old = comp->load.incap_U * info->load.incap_C;
+		double Q_new = incap_U_new * info->load.incap_C;
+		double Q_delta = Q_new - Q_old;
+
+		incap_I = Q_delta / d_t;
+	} else {
+		incap_I = 0;
+	}
+
+	/*
+	 * If the input capacitance has a greater voltage than the network
+	 * input voltage, then we need to calculate how much of the charge
+	 * will be provided by the input capacitance. The amount of charge
+	 * Q_load that the load will draw in one time step is:
+	 *
+	 * Q_load = I_load * t
+	 *
+	 * The amount of charge that the capacitor Q_c can provide is
+	 * dependent upon the delta between capacitor charge and network
+	 * input voltage:
+	 *
+	 * Q_c = (U_c - U_in) * C
+	 *
+	 * After draining this amount of charge, the capacitor's voltage
+	 * will be lower than the input voltage and so no more charge can
+	 * be drawn from it.
+	 */
+	if (comp->load.incap_U > comp->in_volts) {
+		/* Amount of charge requested by the load in this time step */
+		double load_Q = load_I * d_t;
+		/* Amount of charge that can be drawn from the incap */
+		double avail_Q =
+		    (comp->load.incap_U - comp->in_volts) * info->load.incap_C;
+		/* Amount of charge actually drawn from the incap */
+		double used_Q = MIN(load_Q, avail_Q);
+
+		/*
+		 * Subtract the charge provided by the incap from the
+		 * network-demanded charge.
+		 */
+		load_Q -= used_Q;
+
+		/*
+		 * Actual network current is the delta vs what the incap
+		 * can provide.
+		 */
+		comp->in_amps = load_Q / d_t;
+		comp->load.in_amps = load_I;
+		/*
+		 * The final voltage is a mixture of the network voltage
+		 * and incap voltage, in a ratio determined by how many
+		 * units of charge were provided from the incap (at the
+		 * the incap's voltage) vs how many came in from the
+		 * network (at the network's input voltage).
+		 */
+		comp->load.in_volts = (comp->load.incap_U * used_Q +
+		    comp->in_volts * load_Q) / (used_Q + load_Q);
+		comp->load.incap_d_Q = -used_Q;
+	} else {
+		/*
+		 * Don't forget to add the input capacitance charging
+		 * current to the network current draw.
+		 */
+		comp->in_amps = load_I + incap_I;
+		comp->load.in_amps = load_I;
+		comp->load.in_volts = comp->in_volts;
+		comp->load.incap_d_Q = incap_I * d_t;
 	}
 }
 
 static void
 network_load_integrate_bus(const elec_comp_t *src, elec_comp_t *comp,
-    unsigned depth)
+    unsigned depth, double d_t)
 {
 	double amps = 0;
 
@@ -1400,7 +1680,7 @@ network_load_integrate_bus(const elec_comp_t *src, elec_comp_t *comp,
 		if (comp->bus.comps[i] != comp->upstream &&
 		    comp->bus.comps[i]->src == src) {
 			network_load_integrate_comp(src, comp,
-			    comp->bus.comps[i], depth + 1);
+			    comp->bus.comps[i], depth + 1, d_t);
 			ASSERT(!isnan(comp->bus.comps[i]->in_amps));
 			amps += comp->bus.comps[i]->in_amps;
 		}
@@ -1411,7 +1691,7 @@ network_load_integrate_bus(const elec_comp_t *src, elec_comp_t *comp,
 
 static void
 network_load_integrate_tie(const elec_comp_t *src, elec_comp_t *comp,
-    unsigned depth)
+    unsigned depth, double d_t)
 {
 	double amps = 0;
 
@@ -1426,7 +1706,7 @@ network_load_integrate_tie(const elec_comp_t *src, elec_comp_t *comp,
 		if (comp->tie.state[i] &&
 		    comp->tie.buses[i] != comp->upstream) {
 			network_load_integrate_comp(src, comp,
-			    comp->tie.buses[i], depth + 1);
+			    comp->tie.buses[i], depth + 1, d_t);
 			ASSERT(!isnan(comp->tie.buses[i]->in_amps));
 			amps += comp->tie.buses[i]->in_amps;
 		}
@@ -1438,7 +1718,7 @@ network_load_integrate_tie(const elec_comp_t *src, elec_comp_t *comp,
 
 static void
 network_load_integrate_cb(const elec_comp_t *src, elec_comp_t *comp,
-    unsigned depth)
+    unsigned depth, double d_t)
 {
 	ASSERT(src != NULL);
 	ASSERT(comp != NULL);
@@ -1450,12 +1730,12 @@ network_load_integrate_cb(const elec_comp_t *src, elec_comp_t *comp,
 		return;
 	if (comp->upstream == comp->cb.sides[0]) {
 		network_load_integrate_comp(src, comp,
-		    comp->cb.sides[1], depth + 1);
+		    comp->cb.sides[1], depth + 1, d_t);
 		comp->out_amps = comp->cb.sides[1]->in_amps;
 	} else {
 		ASSERT3P(comp->upstream, ==, comp->cb.sides[1]);
 		network_load_integrate_comp(src, comp,
-		    comp->cb.sides[0], depth + 1);
+		    comp->cb.sides[0], depth + 1, d_t);
 		comp->out_amps = comp->cb.sides[0]->in_amps;
 	}
 	ASSERT(!isnan(comp->in_amps));
@@ -1464,7 +1744,8 @@ network_load_integrate_cb(const elec_comp_t *src, elec_comp_t *comp,
 
 static void
 network_load_integrate_comp(const elec_comp_t *src,
-    const elec_comp_t *upstream, elec_comp_t *comp, unsigned depth)
+    const elec_comp_t *upstream, elec_comp_t *comp, unsigned depth,
+    double d_t)
 {
 	ASSERT(src != NULL);
 	ASSERT(src->info != NULL);
@@ -1482,13 +1763,13 @@ network_load_integrate_comp(const elec_comp_t *src,
 	switch (comp->info->type) {
 	case ELEC_BATT:
 		network_load_integrate_comp(src, comp, comp->batt.bus,
-		    depth + 1);
+		    depth + 1, d_t);
 		comp->out_amps = comp->batt.bus->in_amps;
 		comp->batt.prev_amps = comp->out_amps;
 		break;
 	case ELEC_GEN:
 		network_load_integrate_comp(src, comp, comp->gen.bus,
-		    depth + 1);
+		    depth + 1, d_t);
 		comp->out_amps = comp->gen.bus->in_amps;
 		comp->in_volts = comp->out_volts;
 		comp->in_amps = comp->out_amps /
@@ -1496,23 +1777,23 @@ network_load_integrate_comp(const elec_comp_t *src,
 		    comp->info->gen.eff_curve, B_TRUE);
 		break;
 	case ELEC_TRU:
-		network_load_integrate_tru(comp, depth);
+		network_load_integrate_tru(comp, depth, d_t);
 		break;
 	case ELEC_LOAD:
-		network_load_integrate_load(comp, depth);
+		network_load_integrate_load(comp, depth, d_t);
 		break;
 	case ELEC_BUS:
-		network_load_integrate_bus(src, comp, depth);
+		network_load_integrate_bus(src, comp, depth, d_t);
 		break;
 	case ELEC_CB:
-		network_load_integrate_cb(src, comp, depth);
+		network_load_integrate_cb(src, comp, depth, d_t);
 		break;
 	case ELEC_TIE:
-		network_load_integrate_tie(src, comp, depth);
+		network_load_integrate_tie(src, comp, depth, d_t);
 		break;
 	case ELEC_DIODE:
 		network_load_integrate_comp(src, comp,
-		    comp->diode.sides[1], depth + 1);
+		    comp->diode.sides[1], depth + 1, d_t);
 		comp->out_amps = comp->diode.sides[1]->in_amps;
 		comp->in_amps = comp->out_amps;
 		ASSERT(!isnan(comp->in_amps));
@@ -1521,7 +1802,7 @@ network_load_integrate_comp(const elec_comp_t *src,
 }
 
 static void
-network_load_integrate(elec_sys_t *sys)
+network_load_integrate(elec_sys_t *sys, double d_t)
 {
 	ASSERT(sys != NULL);
 
@@ -1530,7 +1811,7 @@ network_load_integrate(elec_sys_t *sys)
 		ASSERT(comp->info != NULL);
 		if (comp->info->type == ELEC_BATT ||
 		    comp->info->type == ELEC_GEN) {
-			network_load_integrate_comp(comp, comp, comp, 0);
+			network_load_integrate_comp(comp, comp, comp, 0, d_t);
 		}
 	}
 }
@@ -1546,11 +1827,27 @@ elec_sys_worker(void *userinfo)
 
 	mutex_enter(&sys->lock);
 
+	for (user_cb_info_t *ucbi = avl_first(&sys->user_cbs); ucbi != NULL;
+	    ucbi = AVL_NEXT(&sys->user_cbs, ucbi)) {
+		if (ucbi->pre) {
+			ASSERT(ucbi->cb != NULL);
+			ucbi->cb(sys, B_TRUE, ucbi->userinfo);
+		}
+	}
+
 	network_reset(sys);
 	network_srcs_update(sys, d_t);
 	network_paint(sys);
-	network_load_integrate(sys);
+	network_load_integrate(sys, d_t);
 	network_loads_update(sys, d_t);
+
+	for (user_cb_info_t *ucbi = avl_first(&sys->user_cbs); ucbi != NULL;
+	    ucbi = AVL_NEXT(&sys->user_cbs, ucbi)) {
+		if (!ucbi->pre) {
+			ASSERT(ucbi->cb != NULL);
+			ucbi->cb(sys, B_FALSE, ucbi->userinfo);
+		}
+	}
 
 	mutex_exit(&sys->lock);
 
@@ -1610,8 +1907,8 @@ libelec_cb_get_temp(const elec_comp_t *comp)
 }
 
 void
-libelec_tie_set(elec_comp_t *comp, elec_comp_info_t *const* bus_list,
-    size_t list_len)
+libelec_tie_set_info_list(elec_comp_t *comp,
+    elec_comp_info_t **bus_list, size_t list_len)
 {
 	elec_sys_t *sys;
 	bool_t *new_state;
@@ -1631,20 +1928,63 @@ libelec_tie_set(elec_comp_t *comp, elec_comp_info_t *const* bus_list,
 		return;
 	}
 
+	/* The buslist is immutable, so no need to lock */
 	new_state = safe_calloc(comp->tie.n_buses, sizeof (*new_state));
 	for (size_t i = 0; i < comp->tie.n_buses; i++) {
-		for (size_t j = 0; j < list_len; j++) {
+		size_t j;
+		for (j = 0; j < list_len; j++) {
 			if (comp->tie.buses[i]->info == bus_list[j]) {
 				new_state[i] = B_TRUE;
 				break;
 			}
 		}
+		ASSERT(j != list_len);
 	}
+
 	mutex_enter(&sys->lock);
 	memcpy(comp->tie.state, new_state,
 	    comp->tie.n_buses * sizeof (*comp->tie.state));
 	mutex_exit(&sys->lock);
 	free(new_state);
+}
+
+void
+libelec_tie_set(elec_comp_t *comp, ...)
+{
+	va_list ap;
+
+	ASSERT(comp != NULL);
+
+	va_start(ap, comp);
+	libelec_tie_set_v(comp, ap);
+	va_end(ap);
+}
+
+void
+libelec_tie_set_v(elec_comp_t *comp, va_list ap)
+{
+	va_list ap2;
+	elec_comp_info_t **bus_list;
+	size_t len;
+
+	ASSERT(comp != NULL);
+	ASSERT(comp->sys != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT3U(comp->info->type, ==, ELEC_TIE);
+
+	va_copy(ap2, ap);
+	for (len = 0; va_arg(ap2, elec_comp_t *) != NULL; len++)
+		;
+	va_end(ap2);
+
+	bus_list = safe_malloc(sizeof (*bus_list) * len);
+	for (size_t i = 0; i < len; i++) {
+		/* Fuck C and its const fuckness */
+		bus_list[i] =
+		    (elec_comp_info_t *)(va_arg(ap, elec_comp_t *))->info;
+	}
+	libelec_tie_set_info_list(comp, bus_list, len);
+	free(bus_list);
 }
 
 void

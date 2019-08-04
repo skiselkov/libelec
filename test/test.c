@@ -304,7 +304,7 @@ tie(void)
 			}
 		}
 
-		libelec_tie_set(comp, bus_list, list_len);
+		libelec_tie_set_info_list(comp, bus_list, list_len);
 
 		free_strlist(comps, list_len);
 		free(bus_list);
