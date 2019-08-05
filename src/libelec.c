@@ -23,6 +23,10 @@
 #include <acfutils/safe_alloc.h>
 #include <acfutils/worker.h>
 
+#ifndef	LIBELEC_NO_LIBSWITCH
+#include <libswitch.h>
+#endif
+
 #include "libelec.h"
 
 #define	EXEC_INTVAL		50000	/* us */
@@ -77,6 +81,9 @@ typedef struct {
 
 typedef struct {
 	elec_comp_t	*sides[2];
+#ifndef	LIBELEC_NO_LIBSWITCH
+	switch_t	*sw;		/* optional libswitch link */
+#endif
 	bool_t		cur_set;
 	bool_t		wk_set;
 	double		temp;		/* relative 0.0 - 1.0 */
@@ -422,7 +429,6 @@ libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos)
 			    !comp->info->load.stab, "Load %s must declare "
 			    "a minimum voltage for a stabilized PSU",
 			    comp->info->name);
-			ASSERT(comp->info->load.get_load != NULL);
 			ASSERT3F(comp->info->load.incap_C, >=, 0);
 			if (comp->info->load.incap_C > 0)
 				ASSERT3F(comp->info->load.incap_R, >, 0);
@@ -490,6 +496,34 @@ libelec_destroy(elec_sys_t *sys)
 
 	free(sys);
 }
+
+#ifndef	LIBELEC_NO_LIBSWITCH
+
+void
+libelec_create_cb_switches(const elec_sys_t *sys, const char *prefix,
+    float anim_rate)
+{
+	ASSERT(sys != NULL);
+	ASSERT(prefix != NULL);
+
+	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
+	    comp = list_next(&sys->comps, comp)) {
+		ASSERT(comp->info != NULL);
+		if (comp->info->type == ELEC_CB) {
+			char name[128], desc[128];
+
+			VERIFY3S(snprintf(name, sizeof (name), "%s/%s",
+			    prefix, comp->info->name), <, sizeof (name));
+			VERIFY3S(snprintf(desc, sizeof (desc),
+			    "Circuit breaker %s", comp->info->name), <,
+			    sizeof (desc));
+			comp->cb.sw = libswitch_add_toggle(name, desc,
+			    anim_rate);
+		}
+	}
+}
+
+#endif	/* LIBELEC_NO_LIBSWITCH */
 
 #ifdef	LIBELEC_SLOW_DEBUG
 
@@ -890,6 +924,9 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 
 			VERIFY(add_info_link(bus, info, NULL));
 			VERIFY(add_info_link(bus, cb, NULL));
+		} else if (strcmp(cmd, "STD_LOAD") == 0 && n_comps == 2 &&
+		    info != NULL && info->type == ELEC_LOAD) {
+			info->load.std_load = atof(comps[1]);
 		} else {
 			logMsg("%s:%d: unknown or malformed line",
 			    filename, linenum);
@@ -1167,6 +1204,12 @@ network_reset(elec_sys_t *sys)
 			mutex_exit(&comp->tie.lock);
 			break;
 		case ELEC_CB:
+#ifndef	LIBELEC_NO_LIBSWITCH
+			if (comp->cb.sw != NULL) {
+				comp->cb.cur_set =
+				    libswitch_read(comp->cb.sw, NULL);
+			}
+#endif	/* LIBELEC_NO_LIBSWITCH */
 			comp->cb.wk_set = comp->cb.cur_set;
 			break;
 		default:
@@ -1595,8 +1638,9 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 	 * Only ask the load if we are receiving sufficient volts.
 	 */
 	if (in_volts_net > comp->info->load.min_volts) {
-		ASSERT(info->load.get_load != NULL);
-		load_WorI = info->load.get_load(comp);
+		load_WorI = info->load.std_load;
+		if (info->load.get_load != NULL)
+			load_WorI += info->load.get_load(comp);
 	} else {
 		load_WorI = 0;
 	}

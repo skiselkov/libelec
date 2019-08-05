@@ -77,6 +77,7 @@ typedef struct {
 	double		min_volts;	/* minimum voltage to operate */
 	/* Unstabilized loads return Amps, stabilized loads return Watts. */
 	double		(*get_load)(elec_comp_t *comp);
+	double		std_load;	/* shorthand for fixed loads */
 	void		*userinfo;
 } elec_load_info_t;
 
@@ -120,6 +121,11 @@ typedef void (*elec_user_cb_t)(elec_sys_t *sys, bool_t pre, void *userinfo);
 
 elec_sys_t *libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos);
 void libelec_destroy(elec_sys_t *sys);
+
+#ifndef	LIBELEC_NO_LIBSWITCH
+void libelec_create_cb_switches(const elec_sys_t *sys, const char *prefix,
+    float anim_rate);
+#endif	/* LIBELEC_NO_LIBSWITCH */
 
 #ifdef	LIBELEC_SLOW_DEBUG
 void libelec_step(elec_sys_t *sys);
