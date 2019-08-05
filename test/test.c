@@ -26,6 +26,7 @@
 #include <acfutils/safe_alloc.h>
 
 #include "libelec.h"
+#include "libelec_test.h"
 
 #define	WHITE_RGB	1, 1, 1
 #define	BLACK_RGB	0, 0, 0

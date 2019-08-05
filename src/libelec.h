@@ -72,6 +72,7 @@ typedef struct {
 	bool_t		stab;		/* Stabilized PSU, or const-current? */
 	double		incap_C;	/* Input capacitance in Farad */
 	double		incap_R;	/* Resitance (Ohm) for incap charging */
+	double		incap_leak_Qps;	/* Incap leakage rate in Coulomb/s */
 	bool_t		ac;		/* Needs AC or DC input? */
 	double		min_volts;	/* minimum voltage to operate */
 	/* Unstabilized loads return Amps, stabilized loads return Watts. */
@@ -140,8 +141,6 @@ elec_comp_t *libelec_info2comp(const elec_sys_t *sys,
 const elec_comp_info_t *libelec_comp2info(const elec_comp_t *comp);
 
 elec_comp_t *libelec_comp_find(elec_sys_t *sys, const char *name);
-elec_comp_t *libelec_comp_get_src(const elec_comp_t *comp);
-elec_comp_t *libelec_comp_get_upstream(const elec_comp_t *comp);
 size_t libelec_comp_get_num_conns(const elec_comp_t *comp);
 elec_comp_t *libelec_comp_get_conn(const elec_comp_t *comp, size_t i);
 
@@ -162,8 +161,8 @@ void libelec_tie_set_info_list(elec_comp_t *comp,
 void libelec_tie_set(elec_comp_t *comp, ...);
 void libelec_tie_set_v(elec_comp_t *comp, va_list ap);
 void libelec_tie_set_all(elec_comp_t *comp, bool_t tied);
-bool_t libelec_tie_get_all(const elec_comp_t *comp);
-size_t libelec_tie_get(const elec_comp_t *comp, elec_comp_t **bus_list);
+bool_t libelec_tie_get_all(elec_comp_t *comp);
+size_t libelec_tie_get(elec_comp_t *comp, elec_comp_t **bus_list);
 
 #ifdef __cplusplus
 }

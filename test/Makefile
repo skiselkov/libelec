@@ -25,6 +25,10 @@ OBJS = test.o ../src/libelec.o
 ifeq ($(slow),yes)
     CFLAGS += -DLIBELEC_SLOW_DEBUG
 endif
+ifeq ($(profile),yes)
+    CFLAGS += -pg
+    LDFLAGS += -pg
+endif
 
 all : test
 
