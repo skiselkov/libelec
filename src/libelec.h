@@ -18,6 +18,7 @@
 #include <stdarg.h>
 
 #include <acfutils/geom.h>
+#include <acfutils/sysmacros.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -164,7 +165,7 @@ double libelec_cb_get_temp(const elec_comp_t *comp);
 
 void libelec_tie_set_info_list(elec_comp_t *comp,
     elec_comp_info_t **bus_list, size_t list_len);
-void libelec_tie_set(elec_comp_t *comp, ...);
+void libelec_tie_set(elec_comp_t *comp, ...) SENTINEL_ATTR;
 void libelec_tie_set_v(elec_comp_t *comp, va_list ap);
 void libelec_tie_set_all(elec_comp_t *comp, bool_t tied);
 bool_t libelec_tie_get_all(elec_comp_t *comp);
