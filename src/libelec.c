@@ -512,7 +512,7 @@ libelec_create_cb_switches(const elec_sys_t *sys, const char *prefix,
 		if (comp->info->type == ELEC_CB) {
 			char name[128], desc[128];
 
-			VERIFY3S(snprintf(name, sizeof (name), "%s/%s",
+			VERIFY3S(snprintf(name, sizeof (name), "%s%s",
 			    prefix, comp->info->name), <, sizeof (name));
 			VERIFY3S(snprintf(desc, sizeof (desc),
 			    "Circuit breaker %s", comp->info->name), <,
@@ -1207,7 +1207,7 @@ network_reset(elec_sys_t *sys)
 #ifndef	LIBELEC_NO_LIBSWITCH
 			if (comp->cb.sw != NULL) {
 				comp->cb.cur_set =
-				    libswitch_read(comp->cb.sw, NULL);
+				    !libswitch_read(comp->cb.sw, NULL);
 			}
 #endif	/* LIBELEC_NO_LIBSWITCH */
 			comp->cb.wk_set = comp->cb.cur_set;
