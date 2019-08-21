@@ -635,6 +635,7 @@ main(int argc, char **argv)
 		return (1);
 	sys = libelec_new(infos, num_infos);
 	ASSERT(sys != NULL);
+	libelec_sys_start(sys);
 
 	for (;;) {
 		printf("> ");

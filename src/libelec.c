@@ -33,6 +33,7 @@
 #define	MAX_NETWORK_DEPTH	100	/* dimensionless */
 
 struct elec_sys_s {
+	bool_t		started;
 	worker_t	worker;
 
 	avl_tree_t	info2comp;
@@ -453,14 +454,23 @@ libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos)
 	resolve_comp_links(sys);
 	check_comp_links(sys);
 
-#ifndef	LIBELEC_SLOW_DEBUG
-	worker_init(&sys->worker, elec_sys_worker, EXEC_INTVAL, sys,
-	    "elec_sys");
-#else	/* !LIBELEC_SLOW_DEBUG */
-	worker_init(&sys->worker, elec_sys_worker, 0, sys, "elec_sys");
-#endif	/* !LIBELEC_SLOW_DEBUG */
-
 	return (sys);
+}
+
+void
+libelec_sys_start(elec_sys_t *sys)
+{
+	ASSERT(sys != NULL);
+
+	if (!sys->started) {
+#ifndef	LIBELEC_SLOW_DEBUG
+		worker_init(&sys->worker, elec_sys_worker, EXEC_INTVAL, sys,
+		    "elec_sys");
+#else	/* !LIBELEC_SLOW_DEBUG */
+		worker_init(&sys->worker, elec_sys_worker, 0, sys, "elec_sys");
+#endif	/* !LIBELEC_SLOW_DEBUG */
+		sys->started = B_TRUE;
+	}
 }
 
 void
@@ -472,7 +482,10 @@ libelec_destroy(elec_sys_t *sys)
 
 	ASSERT(sys != NULL);
 
-	worker_fini(&sys->worker);
+	if (sys->started) {
+		worker_fini(&sys->worker);
+		sys->started = B_FALSE;
+	}
 
 	cookie = NULL;
 	while ((ucbi = avl_destroy_nodes(&sys->user_cbs, &cookie)) != NULL)
@@ -1062,7 +1075,7 @@ libelec_comp_find(elec_sys_t *sys, const char *name)
 	ASSERT(sys != NULL);
 	/* Component list is immutable, no need to lock */
 	comp = avl_find(&sys->name2comp, &srch_comp, NULL);
-	VERIFY(comp != NULL);
+	VERIFY_MSG(comp != NULL, "Component %s not found", name);
 
 	return (comp);
 }

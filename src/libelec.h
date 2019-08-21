@@ -121,6 +121,7 @@ typedef struct {
 typedef void (*elec_user_cb_t)(elec_sys_t *sys, bool_t pre, void *userinfo);
 
 elec_sys_t *libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos);
+void libelec_sys_start(elec_sys_t *sys);
 void libelec_destroy(elec_sys_t *sys);
 
 #ifndef	LIBELEC_NO_LIBSWITCH
