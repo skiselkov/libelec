@@ -474,6 +474,16 @@ libelec_sys_start(elec_sys_t *sys)
 }
 
 void
+libelec_sys_stop(elec_sys_t *sys)
+{
+	if (!sys->started)
+		return;
+
+	worker_fini(&sys->worker);
+	sys->started = B_FALSE;
+}
+
+void
 libelec_destroy(elec_sys_t *sys)
 {
 	elec_comp_t *comp;
@@ -482,10 +492,8 @@ libelec_destroy(elec_sys_t *sys)
 
 	ASSERT(sys != NULL);
 
-	if (sys->started) {
-		worker_fini(&sys->worker);
-		sys->started = B_FALSE;
-	}
+	/* libelec_sys_stop MUST be called first! */
+	ASSERT(!sys->started);
 
 	cookie = NULL;
 	while ((ucbi = avl_destroy_nodes(&sys->user_cbs, &cookie)) != NULL)

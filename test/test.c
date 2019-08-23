@@ -670,6 +670,7 @@ main(int argc, char **argv)
 		}
 	}
 
+	libelec_sys_stop(sys);
 	libelec_destroy(sys);
 	libelec_parsed_info_free(infos, num_infos);
 
