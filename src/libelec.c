@@ -1078,14 +1078,10 @@ libelec_comp_find(elec_sys_t *sys, const char *name)
 {
 	const elec_comp_info_t srch_info = { .name = (char *)name };
 	const elec_comp_t srch_comp = { .info = &srch_info };
-	elec_comp_t *comp;
 
 	ASSERT(sys != NULL);
 	/* Component list is immutable, no need to lock */
-	comp = avl_find(&sys->name2comp, &srch_comp, NULL);
-	VERIFY_MSG(comp != NULL, "Component %s not found", name);
-
-	return (comp);
+	return (avl_find(&sys->name2comp, &srch_comp, NULL));
 }
 
 size_t
