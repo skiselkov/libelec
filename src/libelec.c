@@ -114,7 +114,7 @@ typedef struct {
 
 struct elec_comp_s {
 	elec_sys_t		*sys;
-	const elec_comp_info_t	*info;
+	elec_comp_info_t	*info;
 
 	struct {
 		double		in_volts;
@@ -355,7 +355,7 @@ check_comp_links(elec_sys_t *sys)
 }
 
 elec_sys_t *
-libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos)
+libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 {
 	elec_sys_t *sys = safe_calloc(1, sizeof (*sys));
 
@@ -376,7 +376,7 @@ libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos)
 	for (size_t i = 0; i < num_infos; i++) {
 		elec_comp_t *comp = safe_calloc(1, sizeof (*comp));
 		avl_index_t where;
-		const elec_comp_info_t *info = &comp_infos[i];
+		elec_comp_info_t *info = &comp_infos[i];
 
 		comp->sys = sys;
 		comp->info = info;
@@ -1065,7 +1065,7 @@ libelec_info2comp(const elec_sys_t *sys, const elec_comp_info_t *info)
 	return (NULL);
 }
 
-const elec_comp_info_t *
+elec_comp_info_t *
 libelec_comp2info(const elec_comp_t *comp)
 {
 	ASSERT(comp != NULL);
@@ -1076,7 +1076,7 @@ libelec_comp2info(const elec_comp_t *comp)
 elec_comp_t *
 libelec_comp_find(elec_sys_t *sys, const char *name)
 {
-	const elec_comp_info_t srch_info = { .name = (char *)name };
+	elec_comp_info_t srch_info = { .name = (char *)name };
 	const elec_comp_t srch_comp = { .info = &srch_info };
 
 	ASSERT(sys != NULL);

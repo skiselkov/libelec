@@ -120,7 +120,7 @@ typedef struct {
 
 typedef void (*elec_user_cb_t)(elec_sys_t *sys, bool_t pre, void *userinfo);
 
-elec_sys_t *libelec_new(const elec_comp_info_t *comp_infos, size_t num_infos);
+elec_sys_t *libelec_new(elec_comp_info_t *comp_infos, size_t num_infos);
 void libelec_destroy(elec_sys_t *sys);
 
 void libelec_sys_start(elec_sys_t *sys);
@@ -148,7 +148,7 @@ void libelec_walk_comps(elec_sys_t *sys, void (*cb)(elec_comp_t *, void *),
     void *userinfo);
 elec_comp_t *libelec_info2comp(const elec_sys_t *sys,
     const elec_comp_info_t *info);
-const elec_comp_info_t *libelec_comp2info(const elec_comp_t *comp);
+elec_comp_info_t *libelec_comp2info(const elec_comp_t *comp);
 
 elec_comp_t *libelec_comp_find(elec_sys_t *sys, const char *name);
 size_t libelec_comp_get_num_conns(const elec_comp_t *comp);
