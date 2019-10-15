@@ -2179,6 +2179,16 @@ libelec_tie_get(elec_comp_t *comp, elec_comp_t **bus_list)
 	return (n_buses);
 }
 
+size_t
+libelec_tie_get_num_buses(const elec_comp_t *comp)
+{
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT3U(comp->info->type, ==, ELEC_TIE);
+	/* This is immutable, so no need to lock */
+	return (comp->tie.n_buses);
+}
+
 /*
  * This function returns internal mutable state, so it MUSTN'T be used
  * for production code!

@@ -173,6 +173,7 @@ void libelec_tie_set_v(elec_comp_t *comp, va_list ap);
 void libelec_tie_set_all(elec_comp_t *comp, bool_t tied);
 bool_t libelec_tie_get_all(elec_comp_t *comp);
 size_t libelec_tie_get(elec_comp_t *comp, elec_comp_t **bus_list);
+size_t libelec_tie_get_num_buses(const elec_comp_t *comp);
 
 #ifdef __cplusplus
 }
