@@ -175,6 +175,8 @@ bool_t libelec_tie_get_all(elec_comp_t *comp);
 size_t libelec_tie_get(elec_comp_t *comp, elec_comp_t **bus_list);
 size_t libelec_tie_get_num_buses(const elec_comp_t *comp);
 
+double libelec_batt_get_chg_rel(const elec_comp_t *comp);
+
 #ifdef __cplusplus
 }
 #endif

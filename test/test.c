@@ -82,6 +82,11 @@ static elec_func_bind_t binds[] = {
     { "apu_batt", NULL },
     { "ac_bus_load_1", NULL },
     { "ac_bus_load_2", NULL },
+    { "get_load_hyd", get_load },
+    { "get_load_adshc", get_load },
+    { "apu_get_fuel_pmp_load", get_load },
+    { "apu_get_ecu_load", get_load },
+    { "apu_get_starter_load", get_load },
     { NULL, NULL }	/* list terminator */
 };
 
@@ -312,6 +317,30 @@ tie(void)
 		free_strlist(comps, list_len);
 		free(bus_list);
 	}
+}
+
+static void
+print_batts_i(elec_comp_t *comp, void *userinfo)
+{
+	const elec_comp_info_t *info = libelec_comp2info(comp);
+
+	UNUSED(userinfo);
+
+	if (info->type != ELEC_BATT)
+		return;
+
+	printf("%-18s  %5.1fV  %6.1fA  %.2f%%\n",
+	    info->name, libelec_comp_get_out_volts(comp),
+	    libelec_comp_get_out_amps(comp),
+	    libelec_batt_get_chg_rel(comp) * 100);
+}
+
+static void
+print_batts(void)
+{
+	printf("NAME                 U_out    I_out     CHG%% \n"
+	    "------------------  ------  -------  -------\n");
+	libelec_walk_comps(sys, print_batts_i, NULL);
 }
 
 static void
@@ -658,6 +687,8 @@ main(int argc, char **argv)
 			load_cmd();
 		} else if (strcmp(cmd, "dump") == 0) {
 			dump_img();
+		} else if (strcmp(cmd, "b") == 0) {
+			print_batts();
 		} else if (strcmp(cmd, "help") == 0) {
 			print_help();
 #ifdef	LIBELEC_SLOW_DEBUG
