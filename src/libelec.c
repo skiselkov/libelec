@@ -1710,7 +1710,7 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 	/*
 	 * Only ask the load if we are receiving sufficient volts.
 	 */
-	if (in_volts_net > comp->info->load.min_volts) {
+	if (in_volts_net >= comp->info->load.min_volts) {
 		load_WorI = info->load.std_load;
 		if (info->load.get_load != NULL)
 			load_WorI += info->load.get_load(comp);
