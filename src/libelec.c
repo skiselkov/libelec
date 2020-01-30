@@ -192,9 +192,9 @@ user_cb_info_compar(const void *a, const void *b)
 		return (-1);
 	if (ucbi_a->pre && !ucbi_b->pre)
 		return (1);
-	if (ucbi_a->cb < ucbi_b->cb)
+	if ((void *)ucbi_a->cb < (void *)ucbi_b->cb)
 		return (-1);
-	if (ucbi_a->cb > ucbi_b->cb)
+	if ((void *)ucbi_a->cb > (void *)ucbi_b->cb)
 		return (1);
 	if (ucbi_a->userinfo < ucbi_b->userinfo)
 		return (-1);
