@@ -1,7 +1,7 @@
 /*
  * CONFIDENTIAL
  *
- * Copyright 2019 Saso Kiselkov. All rights reserved.
+ * Copyright 2020 Saso Kiselkov. All rights reserved.
  *
  * NOTICE:  All information contained herein is, and remains the property
  * of Saso Kiselkov. The intellectual and technical concepts contained
@@ -16,7 +16,9 @@
 #define	_LIBELEC_H_
 
 #include <stdarg.h>
+#include <stdbool.h>
 
+#include <acfutils/conf.h>
 #include <acfutils/geom.h>
 #include <acfutils/sysmacros.h>
 
@@ -49,7 +51,7 @@ typedef struct {
 } elec_batt_info_t;
 
 typedef struct elec_gen_info_s {
-	bool_t	ac;		/* B_TRUE = AC, B_FALSE = DC */
+	bool	ac;		/* true = AC, false = DC */
 	double	volts;		/* nominal voltage at operating rpm */
 	double	stab_rate;	/* stabilization adaptation rate (FILTER_IN) */
 	double	min_rpm;	/* min rpm at which volts can be achieved */
@@ -70,11 +72,11 @@ typedef struct {
 } elec_tru_info_t;
 
 typedef struct {
-	bool_t		stab;		/* Stabilized PSU, or const-current? */
+	bool		stab;		/* Stabilized PSU, or const-current? */
 	double		incap_C;	/* Input capacitance in Farad */
 	double		incap_R;	/* Resitance (Ohm) for incap charging */
 	double		incap_leak_Qps;	/* Incap leakage rate in Coulomb/s */
-	bool_t		ac;		/* Needs AC or DC input? */
+	bool		ac;		/* Needs AC or DC input? */
 	double		min_volts;	/* minimum voltage to operate */
 	/* Unstabilized loads return Amps, stabilized loads return Watts. */
 	double		(*get_load)(elec_comp_t *comp);
@@ -83,7 +85,7 @@ typedef struct {
 } elec_load_info_t;
 
 typedef struct {
-	bool_t			ac;
+	bool			ac;
 	double			impedance;	/* Ohms */
 	elec_comp_info_t	**comps;	/* NULL-terminated */
 } elec_bus_info_t;
@@ -101,7 +103,7 @@ struct elec_comp_info_s {
 	elec_comp_type_t		type;
 	char				*name;
 	void				*userinfo;
-	bool_t				autogen;
+	bool				autogen;
 	union {
 		elec_batt_info_t	batt;
 		elec_gen_info_t		gen;
@@ -118,13 +120,17 @@ typedef struct {
 	void		*value;
 } elec_func_bind_t;
 
-typedef void (*elec_user_cb_t)(elec_sys_t *sys, bool_t pre, void *userinfo);
+typedef void (*elec_user_cb_t)(elec_sys_t *sys, bool pre, void *userinfo);
 
 elec_sys_t *libelec_new(elec_comp_info_t *comp_infos, size_t num_infos);
 void libelec_destroy(elec_sys_t *sys);
 
 void libelec_sys_start(elec_sys_t *sys);
 void libelec_sys_stop(elec_sys_t *sys);
+
+void libelec_serialize(elec_sys_t *sys, conf_t *ser, const char *prefix);
+bool libelec_deserialize(elec_sys_t *sys, const conf_t *ser,
+    const char *prefix);
 
 #ifndef	LIBELEC_NO_LIBSWITCH
 void libelec_create_cb_switches(const elec_sys_t *sys, const char *prefix,
@@ -139,9 +145,9 @@ elec_comp_info_t *libelec_infos_parse(const char *filename,
     const elec_func_bind_t *binds, size_t *num_infos);
 void libelec_parsed_info_free(elec_comp_info_t *infos, size_t num_infos);
 
-void libelec_add_user_cb(elec_sys_t *sys, bool_t pre, elec_user_cb_t cb,
+void libelec_add_user_cb(elec_sys_t *sys, bool pre, elec_user_cb_t cb,
     void *userinfo);
-void libelec_remove_user_cb(elec_sys_t *sys, bool_t pre, elec_user_cb_t cb,
+void libelec_remove_user_cb(elec_sys_t *sys, bool pre, elec_user_cb_t cb,
     void *userinfo);
 
 void libelec_walk_comps(elec_sys_t *sys, void (*cb)(elec_comp_t *, void *),
@@ -162,16 +168,16 @@ double libelec_comp_get_in_pwr(const elec_comp_t *comp);
 double libelec_comp_get_out_pwr(const elec_comp_t *comp);
 double libelec_comp_get_incap_volts(const elec_comp_t *comp);
 
-void libelec_cb_set(elec_comp_t *comp, bool_t set);
-bool_t libelec_cb_get(const elec_comp_t *comp);
+void libelec_cb_set(elec_comp_t *comp, bool set);
+bool libelec_cb_get(const elec_comp_t *comp);
 double libelec_cb_get_temp(const elec_comp_t *comp);
 
 void libelec_tie_set_info_list(elec_comp_t *comp,
     elec_comp_info_t **bus_list, size_t list_len);
 void libelec_tie_set(elec_comp_t *comp, ...) SENTINEL_ATTR;
 void libelec_tie_set_v(elec_comp_t *comp, va_list ap);
-void libelec_tie_set_all(elec_comp_t *comp, bool_t tied);
-bool_t libelec_tie_get_all(elec_comp_t *comp);
+void libelec_tie_set_all(elec_comp_t *comp, bool tied);
+bool libelec_tie_get_all(elec_comp_t *comp);
 size_t libelec_tie_get(elec_comp_t *comp, elec_comp_t **bus_list);
 size_t libelec_tie_get_num_buses(const elec_comp_t *comp);
 

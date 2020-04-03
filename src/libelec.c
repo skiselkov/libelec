@@ -1,7 +1,7 @@
 /*
  * CONFIDENTIAL
  *
- * Copyright 2019 Saso Kiselkov. All rights reserved.
+ * Copyright 2020 Saso Kiselkov. All rights reserved.
  *
  * NOTICE:  All information contained herein is, and remains the property
  * of Saso Kiselkov. The intellectual and technical concepts contained
@@ -37,8 +37,9 @@
 #define	MAX_NETWORK_DEPTH	100	/* dimensionless */
 
 struct elec_sys_s {
-	bool_t		started;
+	bool		started;
 	worker_t	worker;
+	mutex_t		worker_interlock;
 
 	avl_tree_t	info2comp;
 	avl_tree_t	name2comp;
@@ -76,7 +77,7 @@ typedef struct {
 	/* Change of input capacitor charge */
 	double		incap_d_Q;
 
-	bool_t		seen;
+	bool		seen;
 } elec_load_t;
 
 typedef struct {
@@ -108,8 +109,8 @@ typedef struct {
 	 * the tie state lock throughout the worker loop.
 	 */
 	mutex_t		lock;
-	bool_t		*cur_state;
-	bool_t		*wk_state;
+	bool		*cur_state;
+	bool		*wk_state;
 } elec_tie_t;
 
 typedef struct {
@@ -167,7 +168,7 @@ struct elec_comp_s {
 };
 
 typedef struct {
-	bool_t		pre;
+	bool		pre;
 	elec_user_cb_t	cb;
 	void		*userinfo;
 	avl_node_t	node;
@@ -394,6 +395,7 @@ libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 	mutex_init(&sys->user_cbs_lock);
 	avl_create(&sys->user_cbs, user_cb_info_compar,
 	    sizeof (user_cb_info_t), offsetof(user_cb_info_t, node));
+	mutex_init(&sys->worker_interlock);
 
 	for (size_t i = 0; i < num_infos; i++) {
 		elec_comp_t *comp = safe_calloc(1, sizeof (*comp));
@@ -460,7 +462,7 @@ libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 			ASSERT(comp->info->bus.comps != NULL);
 			break;
 		case ELEC_CB:
-			comp->cb.cur_set = comp->cb.wk_set = B_TRUE;
+			comp->cb.cur_set = comp->cb.wk_set = true;
 			break;
 		case ELEC_TIE:
 			mutex_init(&comp->tie.lock);
@@ -473,17 +475,17 @@ libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 
 #ifdef	LIBELEC_WITH_DRS
 		dr_create_f64(&comp->drs.in_volts, &comp->ro.in_volts,
-		    B_FALSE, "libelec/comp/%s/in_volts", comp->info->name);
+		    false, "libelec/comp/%s/in_volts", comp->info->name);
 		dr_create_f64(&comp->drs.out_volts, &comp->ro.out_volts,
-		    B_FALSE, "libelec/comp/%s/out_volts", comp->info->name);
+		    false, "libelec/comp/%s/out_volts", comp->info->name);
 		dr_create_f64(&comp->drs.in_amps, &comp->ro.in_amps,
-		    B_FALSE, "libelec/comp/%s/in_amps", comp->info->name);
+		    false, "libelec/comp/%s/in_amps", comp->info->name);
 		dr_create_f64(&comp->drs.out_amps, &comp->ro.out_amps,
-		    B_FALSE, "libelec/comp/%s/out_amps", comp->info->name);
+		    false, "libelec/comp/%s/out_amps", comp->info->name);
 		dr_create_f64(&comp->drs.in_pwr, &comp->ro.in_pwr,
-		    B_FALSE, "libelec/comp/%s/in_pwr", comp->info->name);
+		    false, "libelec/comp/%s/in_pwr", comp->info->name);
 		dr_create_f64(&comp->drs.out_pwr, &comp->ro.out_pwr,
-		    B_FALSE, "libelec/comp/%s/out_pwr", comp->info->name);
+		    false, "libelec/comp/%s/out_pwr", comp->info->name);
 #endif	/* defined(LIBELEC_WITH_DRS) */
 	}
 
@@ -506,7 +508,7 @@ libelec_sys_start(elec_sys_t *sys)
 #else	/* !LIBELEC_SLOW_DEBUG */
 		worker_init(&sys->worker, elec_sys_worker, 0, sys, "elec_sys");
 #endif	/* !LIBELEC_SLOW_DEBUG */
-		sys->started = B_TRUE;
+		sys->started = true;
 	}
 }
 
@@ -517,7 +519,128 @@ libelec_sys_stop(elec_sys_t *sys)
 		return;
 
 	worker_fini(&sys->worker);
-	sys->started = B_FALSE;
+	sys->started = false;
+}
+
+static void
+elec_comp_serialize(elec_comp_t *comp, conf_t *ser, const char *prefix)
+{
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT(comp->info->name != NULL);
+	ASSERT(ser != NULL);
+	ASSERT(prefix != NULL);
+
+	switch (comp->info->type) {
+	case ELEC_BATT:
+		conf_set_d_v(ser, "%s/%s/prev_amps", comp->batt.prev_amps,
+		    prefix, comp->info->name);
+		conf_set_d_v(ser, "%s/%s/chg_rel", comp->batt.chg_rel,
+		    prefix, comp->info->name);
+		break;
+	case ELEC_GEN:
+		conf_set_d_v(ser, "%s/%s/stab_factor", comp->gen.stab_factor,
+		    prefix, comp->info->name);
+		break;
+	case ELEC_LOAD:
+		conf_set_d_v(ser, "%s/%s/incap_U", comp->load.incap_U,
+		    prefix, comp->info->name);
+		break;
+	case ELEC_CB:
+		conf_set_b_v(ser, "%s/%s/cur_set", comp->cb.cur_set,
+		    prefix, comp->info->name);
+		conf_set_d_v(ser, "%s/%s/temp", comp->cb.temp,
+		    prefix, comp->info->name);
+		break;
+	case ELEC_TIE:
+		mutex_enter(&comp->tie.lock);
+		conf_set_data_v(ser, "%s/%s/cur_state", comp->tie.cur_state,
+		    comp->tie.n_buses * sizeof (*comp->tie.cur_state),
+		    prefix, comp->info->name);
+		mutex_exit(&comp->tie.lock);
+		break;
+	default:
+		break;
+	}
+}
+
+static bool
+elec_comp_deserialize(elec_comp_t *comp, const conf_t *ser, const char *prefix)
+{
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT(comp->info->name != NULL);
+	ASSERT(ser != NULL);
+	ASSERT(prefix != NULL);
+
+	switch (comp->info->type) {
+	case ELEC_BATT:
+		return (conf_get_d_v(ser, "%s/%s/prev_amps",
+		    &comp->batt.prev_amps, prefix, comp->info->name) &&
+		    conf_get_d_v(ser, "%s/%s/chg_rel", &comp->batt.chg_rel,
+		    prefix, comp->info->name));
+	case ELEC_GEN:
+		return (conf_get_d_v(ser, "%s/%s/stab_factor",
+		    &comp->gen.stab_factor, prefix, comp->info->name));
+	case ELEC_LOAD:
+		return (conf_get_d_v(ser, "%s/%s/incap_U",
+		    &comp->load.incap_U, prefix, comp->info->name));
+	case ELEC_CB:
+		return (conf_get_b_v(ser, "%s/%s/cur_set", &comp->cb.cur_set,
+		    prefix, comp->info->name) &&
+		    conf_get_d_v(ser, "%s/%s/temp", &comp->cb.temp,
+		    prefix, comp->info->name));
+	case ELEC_TIE:
+		mutex_enter(&comp->tie.lock);
+		conf_get_data_v(ser, "%s/%s/cur_state", comp->tie.cur_state,
+		    comp->tie.n_buses * sizeof (*comp->tie.cur_state),
+		    prefix, comp->info->name);
+		mutex_exit(&comp->tie.lock);
+		return (true);
+	default:
+		return (true);
+	}
+}
+
+void
+libelec_serialize(elec_sys_t *sys, conf_t *ser, const char *prefix)
+{
+	ASSERT(sys != NULL);
+	ASSERT(ser != NULL);
+	ASSERT(prefix != NULL);
+
+	mutex_enter(&sys->worker_interlock);
+
+	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
+	    comp = list_next(&sys->comps, comp)) {
+		elec_comp_serialize(comp, ser, prefix);
+	}
+
+	mutex_exit(&sys->worker_interlock);
+}
+
+bool
+libelec_deserialize(elec_sys_t *sys, const conf_t *ser, const char *prefix)
+{
+	ASSERT(sys != NULL);
+	ASSERT(ser != NULL);
+	ASSERT(prefix != NULL);
+
+	mutex_enter(&sys->worker_interlock);
+
+	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
+	    comp = list_next(&sys->comps, comp)) {
+		if (!elec_comp_deserialize(comp, ser, prefix)) {
+			logMsg("Failed to deserialize %s: malformed state",
+			    comp->info->name);
+			mutex_exit(&sys->worker_interlock);
+			return (false);
+		}
+	}
+
+	mutex_exit(&sys->worker_interlock);
+
+	return (true);
 }
 
 void
@@ -551,6 +674,8 @@ libelec_destroy(elec_sys_t *sys)
 	while ((comp = list_remove_head(&sys->comps)) != NULL)
 		comp_free(comp);
 	list_destroy(&sys->comps);
+
+	mutex_destroy(&sys->worker_interlock);
 
 	free(sys);
 }
@@ -619,7 +744,7 @@ comp_type2str(elec_comp_type_t type)
 	}
 }
 
-static bool_t
+static bool
 bind_list_find(const elec_func_bind_t *binds, const char *name, void *ptr)
 {
 	void **pp = (void **)ptr;
@@ -627,27 +752,27 @@ bind_list_find(const elec_func_bind_t *binds, const char *name, void *ptr)
 	for (size_t i = 0; binds != NULL && binds[i].name != NULL; i++) {
 		if (strcmp(binds[i].name, name) == 0) {
 			*pp = binds[i].value;
-			return (B_TRUE);
+			return (true);
 		}
 	}
-	return (B_FALSE);
+	return (false);
 }
 
-static bool_t
+static bool
 add_info_link(elec_comp_info_t *info, elec_comp_info_t *info2,
     const char *slot_qual)
 {
 	switch (info->type) {
 	case ELEC_TRU:
 		if (slot_qual == NULL)
-			return (B_FALSE);
+			return (false);
 		if (strcmp(slot_qual, "AC") == 0) {
 			if (info->tru.ac != NULL)
-				return (B_FALSE);
+				return (false);
 			info->tru.ac = info2;
 		} else {
 			if (info->tru.dc != NULL)
-				return (B_FALSE);
+				return (false);
 			info->tru.dc = info2;
 		}
 		break;
@@ -665,22 +790,22 @@ add_info_link(elec_comp_info_t *info, elec_comp_info_t *info2,
 	}
 	case ELEC_DIODE:
 		if (slot_qual == NULL)
-			return (B_FALSE);
+			return (false);
 		if (strcmp(slot_qual, "IN") == 0) {
 			if (info->diode.sides[0] != NULL)
-				return (B_FALSE);
+				return (false);
 			info->diode.sides[0] = info2;
 		} else {
 			if (info->diode.sides[1] != NULL)
-				return (B_FALSE);
+				return (false);
 			info->diode.sides[1] = info2;
 		}
 		break;
 	default:
-		return(B_TRUE);
+		return(true);
 	}
 
-	return (B_TRUE);
+	return (true);
 }
 
 static elec_comp_info_t *
@@ -770,7 +895,7 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 		} \
 	} while (0)
 
-		comps = strsplit(line, " ", B_TRUE, &n_comps);
+		comps = strsplit(line, " ", true, &n_comps);
 		cmd = comps[0];
 		if (strcmp(cmd, "BATT") == 0 && n_comps == 2) {
 			ASSERT3U(comp_i, <, num_comps);
@@ -988,13 +1113,13 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 			cb->name = sprintf_alloc("CB_%s", info->name);
 			cb->cb.rate = 1;
 			cb->cb.max_amps = atof(comps[1]);
-			cb->autogen = B_TRUE;
+			cb->autogen = true;
 
 			bus = &infos[comp_i++];
 			bus->type = ELEC_BUS;
 			bus->name = sprintf_alloc("CB_BUS_%s", info->name);
 			bus->bus.ac = info->load.ac;
-			bus->autogen = B_TRUE;
+			bus->autogen = true;
 
 			VERIFY(add_info_link(bus, info, NULL));
 			VERIFY(add_info_link(bus, cb, NULL));
@@ -1046,7 +1171,7 @@ libelec_parsed_info_free(elec_comp_info_t *infos, size_t num_infos)
 }
 
 void
-libelec_add_user_cb(elec_sys_t *sys, bool_t pre, elec_user_cb_t cb,
+libelec_add_user_cb(elec_sys_t *sys, bool pre, elec_user_cb_t cb,
     void *userinfo)
 {
 	user_cb_info_t *info = safe_calloc(1, sizeof (*info));
@@ -1066,7 +1191,7 @@ libelec_add_user_cb(elec_sys_t *sys, bool_t pre, elec_user_cb_t cb,
 }
 
 void
-libelec_remove_user_cb(elec_sys_t *sys, bool_t pre, elec_user_cb_t cb,
+libelec_remove_user_cb(elec_sys_t *sys, bool pre, elec_user_cb_t cb,
     void *userinfo)
 {
 	user_cb_info_t srch, *info;
@@ -1265,7 +1390,7 @@ network_reset(elec_sys_t *sys)
 		comp->integ_mask = 0;
 		switch (comp->info->type) {
 		case ELEC_LOAD:
-			comp->load.seen = B_FALSE;
+			comp->load.seen = false;
 			break;
 		case ELEC_TIE:
 			/* Transfer the latest tie state to the worker set */
@@ -1350,12 +1475,12 @@ network_update_batt(elec_comp_t *batt, double d_t)
 
 	T = batt->info->batt.get_temp(batt);
 	ASSERT3F(T, >, 0);
-	temp_coeff = fx_lin_multi(T, temp_energy_curve, B_TRUE);
+	temp_coeff = fx_lin_multi(T, temp_energy_curve, true);
 
 	I_max = batt->info->batt.max_pwr / batt->info->batt.volts;
 	I_rel = batt->batt.prev_amps / I_max;
 	U = batt->info->batt.volts * (1 - pow(I_rel, 1.45)) *
-	    fx_lin_multi(batt->batt.chg_rel, chg_volt_curve, B_TRUE);
+	    fx_lin_multi(batt->batt.chg_rel, chg_volt_curve, true);
 
 	J_max = batt->info->batt.capacity * temp_coeff;
 	J = batt->batt.chg_rel * J_max;
@@ -1381,7 +1506,7 @@ network_update_cb(elec_comp_t *cb, double d_t)
 	FILTER_IN(cb->cb.temp, amps_rat, d_t, cb->info->cb.rate);
 
 	if (cb->cb.temp >= 1.0)
-		cb->cb.cur_set = cb->cb.wk_set = B_FALSE;
+		cb->cb.cur_set = cb->cb.wk_set = false;
 }
 
 static void
@@ -1477,7 +1602,7 @@ static void
 network_paint_src_tie(elec_comp_t *src, elec_comp_t *upstream,
     elec_comp_t *comp, unsigned depth)
 {
-	bool_t found = B_FALSE, tied = B_FALSE;
+	bool found = false, tied = false;
 
 	ASSERT(src != NULL);
 	ASSERT(upstream != NULL);
@@ -1495,9 +1620,9 @@ network_paint_src_tie(elec_comp_t *src, elec_comp_t *upstream,
 					comp->upstream = upstream;
 					comp->rw.in_volts = src->rw.out_volts;
 				}
-				tied = B_TRUE;
+				tied = true;
 			}
-			found = B_TRUE;
+			found = true;
 			break;
 		}
 	}
@@ -1681,7 +1806,7 @@ network_load_integrate_tru(elec_comp_t *comp, unsigned depth,
 
 	comp->rw.out_amps = comp->tru.dc->rw.in_amps;
 	eff = fx_lin_multi(comp->rw.out_amps, comp->info->tru.eff_curve,
-	    B_TRUE);
+	    true);
 	ASSERT3F(eff, >, 0);
 	comp->rw.in_amps = ((comp->rw.out_volts / comp->rw.in_volts) *
 	    comp->rw.out_amps) / eff;
@@ -1850,7 +1975,7 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 	}
 	ASSERT(!isnan(comp->rw.out_amps));
 	ASSERT(!isnan(comp->rw.out_volts));
-	comp->load.seen = B_TRUE;
+	comp->load.seen = true;
 }
 
 static void
@@ -1967,7 +2092,7 @@ network_load_integrate_comp(const elec_comp_t *src,
 		comp->rw.in_volts = comp->rw.out_volts;
 		comp->rw.in_amps = comp->rw.out_amps /
 		    fx_lin_multi(comp->rw.in_volts * comp->rw.out_amps,
-		    comp->info->gen.eff_curve, B_TRUE);
+		    comp->info->gen.eff_curve, true);
 		break;
 	case ELEC_TRU:
 		network_load_integrate_tru(comp, depth, src_mask, d_t);
@@ -2032,12 +2157,14 @@ elec_sys_worker(void *userinfo)
 	ASSERT(userinfo != NULL);
 	sys = userinfo;
 
+	mutex_enter(&sys->worker_interlock);
+
 	mutex_enter(&sys->user_cbs_lock);
 	for (user_cb_info_t *ucbi = avl_first(&sys->user_cbs); ucbi != NULL;
 	    ucbi = AVL_NEXT(&sys->user_cbs, ucbi)) {
 		if (ucbi->pre) {
 			ASSERT(ucbi->cb != NULL);
-			ucbi->cb(sys, B_TRUE, ucbi->userinfo);
+			ucbi->cb(sys, true, ucbi->userinfo);
 		}
 	}
 	mutex_exit(&sys->user_cbs_lock);
@@ -2054,12 +2181,14 @@ elec_sys_worker(void *userinfo)
 	    ucbi = AVL_NEXT(&sys->user_cbs, ucbi)) {
 		if (!ucbi->pre) {
 			ASSERT(ucbi->cb != NULL);
-			ucbi->cb(sys, B_FALSE, ucbi->userinfo);
+			ucbi->cb(sys, false, ucbi->userinfo);
 		}
 	}
 	mutex_exit(&sys->user_cbs_lock);
 
-	return (B_TRUE);
+	mutex_exit(&sys->worker_interlock);
+
+	return (true);
 }
 
 static void
@@ -2090,7 +2219,7 @@ comp_free(elec_comp_t *comp)
 }
 
 void
-libelec_cb_set(elec_comp_t *comp, bool_t set)
+libelec_cb_set(elec_comp_t *comp, bool set)
 {
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
@@ -2102,7 +2231,7 @@ libelec_cb_set(elec_comp_t *comp, bool_t set)
 	comp->cb.cur_set = set;
 }
 
-bool_t
+bool
 libelec_cb_get(const elec_comp_t *comp)
 {
 	ASSERT(comp != NULL);
@@ -2126,7 +2255,7 @@ void
 libelec_tie_set_info_list(elec_comp_t *comp,
     elec_comp_info_t **bus_list, size_t list_len)
 {
-	bool_t *new_state;
+	bool *new_state;
 
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
@@ -2147,7 +2276,7 @@ libelec_tie_set_info_list(elec_comp_t *comp,
 		size_t j;
 		for (j = 0; j < comp->tie.n_buses; j++) {
 			if (comp->tie.buses[j]->info == bus_list[i]) {
-				new_state[j] = B_TRUE;
+				new_state[j] = true;
 				break;
 			}
 		}
@@ -2204,7 +2333,7 @@ libelec_tie_set_v(elec_comp_t *comp, va_list ap)
 }
 
 void
-libelec_tie_set_all(elec_comp_t *comp, bool_t tied)
+libelec_tie_set_all(elec_comp_t *comp, bool tied)
 {
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
@@ -2216,10 +2345,10 @@ libelec_tie_set_all(elec_comp_t *comp, bool_t tied)
 	mutex_exit(&comp->tie.lock);
 }
 
-bool_t
+bool
 libelec_tie_get_all(elec_comp_t *comp)
 {
-	bool_t tied = B_TRUE;
+	bool tied = true;
 
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
