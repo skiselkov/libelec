@@ -31,6 +31,8 @@
 #include <libswitch.h>
 #endif
 
+#include <abus_ser.h>
+
 #include "libelec.h"
 
 #define	EXEC_INTVAL		50000	/* us */
@@ -53,8 +55,10 @@ struct elec_sys_s {
 
 typedef struct {
 	elec_comp_t	*bus;
+	SERIALIZE_START_MARKER;
 	double		prev_amps;
 	double		chg_rel;
+	SERIALIZE_END_MARKER;
 } elec_batt_t;
 
 typedef struct {
@@ -62,7 +66,9 @@ typedef struct {
 	double		ctr_rpm;
 	double		min_stab;
 	double		max_stab;
+	SERIALIZE_START_MARKER;
 	double		stab_factor;
+	SERIALIZE_END_MARKER;
 } elec_gen_t;
 
 typedef struct {
@@ -72,8 +78,10 @@ typedef struct {
 
 typedef struct {
 	elec_comp_t	*bus;
+	SERIALIZE_START_MARKER;
 	/* Virtual input capacitor voltage */
 	double		incap_U;
+	SERIALIZE_END_MARKER;
 	/* Change of input capacitor charge */
 	double		incap_d_Q;
 
@@ -90,9 +98,11 @@ typedef struct {
 #ifndef	LIBELEC_NO_LIBSWITCH
 	switch_t	*sw;		/* optional libswitch link */
 #endif
+	SERIALIZE_START_MARKER;
 	bool_t		cur_set;
 	bool_t		wk_set;
 	double		temp;		/* relative 0.0 - 1.0 */
+	SERIALIZE_END_MARKER;
 } elec_cb_t;
 
 typedef struct {
@@ -128,6 +138,7 @@ struct elec_comp_s {
 	 */
 	uint64_t		integ_mask;
 
+	SERIALIZE_START_MARKER;
 	struct {
 		double		in_volts;
 		double		out_volts;
@@ -136,6 +147,7 @@ struct elec_comp_s {
 		double		in_pwr;		/* Watts */
 		double		out_pwr;	/* Watts */
 	} rw, ro;
+	SERIALIZE_END_MARKER;
 
 	elec_comp_t		*src;
 	elec_comp_t		*upstream;
@@ -531,25 +543,24 @@ elec_comp_serialize(elec_comp_t *comp, conf_t *ser, const char *prefix)
 	ASSERT(ser != NULL);
 	ASSERT(prefix != NULL);
 
+	SERIALIZE_DATA_V(comp, ser, "%s/%s/data",
+	    prefix, comp->info->name);
+
 	switch (comp->info->type) {
 	case ELEC_BATT:
-		conf_set_d_v(ser, "%s/%s/prev_amps", comp->batt.prev_amps,
-		    prefix, comp->info->name);
-		conf_set_d_v(ser, "%s/%s/chg_rel", comp->batt.chg_rel,
+		SERIALIZE_DATA_V(&comp->batt, ser, "%s/%s/batt",
 		    prefix, comp->info->name);
 		break;
 	case ELEC_GEN:
-		conf_set_d_v(ser, "%s/%s/stab_factor", comp->gen.stab_factor,
+		SERIALIZE_DATA_V(&comp->batt, ser, "%s/%s/gen",
 		    prefix, comp->info->name);
 		break;
 	case ELEC_LOAD:
-		conf_set_d_v(ser, "%s/%s/incap_U", comp->load.incap_U,
+		SERIALIZE_DATA_V(&comp->batt, ser, "%s/%s/load",
 		    prefix, comp->info->name);
 		break;
 	case ELEC_CB:
-		conf_set_b_v(ser, "%s/%s/cur_set", comp->cb.cur_set,
-		    prefix, comp->info->name);
-		conf_set_d_v(ser, "%s/%s/temp", comp->cb.temp,
+		SERIALIZE_DATA_V(&comp->cb, ser, "%s/%s/cb",
 		    prefix, comp->info->name);
 		break;
 	case ELEC_TIE:
@@ -573,33 +584,42 @@ elec_comp_deserialize(elec_comp_t *comp, const conf_t *ser, const char *prefix)
 	ASSERT(ser != NULL);
 	ASSERT(prefix != NULL);
 
+	DESERIALIZE_DATA_V(comp, ser, "%s/%s/data",
+	    prefix, comp->info->name);
+
 	switch (comp->info->type) {
 	case ELEC_BATT:
-		return (conf_get_d_v(ser, "%s/%s/prev_amps",
-		    &comp->batt.prev_amps, prefix, comp->info->name) &&
-		    conf_get_d_v(ser, "%s/%s/chg_rel", &comp->batt.chg_rel,
-		    prefix, comp->info->name));
+		DESERIALIZE_DATA_V(&comp->batt, ser, "%s/%s/batt",
+		    prefix, comp->info->name);
+		break;
 	case ELEC_GEN:
-		return (conf_get_d_v(ser, "%s/%s/stab_factor",
-		    &comp->gen.stab_factor, prefix, comp->info->name));
+		DESERIALIZE_DATA_V(&comp->batt, ser, "%s/%s/gen",
+		    prefix, comp->info->name);
+		break;
 	case ELEC_LOAD:
-		return (conf_get_d_v(ser, "%s/%s/incap_U",
-		    &comp->load.incap_U, prefix, comp->info->name));
+		DESERIALIZE_DATA_V(&comp->batt, ser, "%s/%s/load",
+		    prefix, comp->info->name);
+		break;
 	case ELEC_CB:
-		return (conf_get_b_v(ser, "%s/%s/cur_set", &comp->cb.cur_set,
-		    prefix, comp->info->name) &&
-		    conf_get_d_v(ser, "%s/%s/temp", &comp->cb.temp,
-		    prefix, comp->info->name));
+		DESERIALIZE_DATA_V(&comp->cb, ser, "%s/%s/cb",
+		    prefix, comp->info->name);
+		break;
 	case ELEC_TIE:
 		mutex_enter(&comp->tie.lock);
-		conf_get_data_v(ser, "%s/%s/cur_state", comp->tie.cur_state,
+		if (conf_get_data_v(ser, "%s/%s/cur_state", comp->tie.cur_state,
 		    comp->tie.n_buses * sizeof (*comp->tie.cur_state),
-		    prefix, comp->info->name);
+		    prefix, comp->info->name) !=
+		    comp->tie.n_buses * sizeof (*comp->tie.cur_state)) {
+			mutex_exit(&comp->tie.lock);
+			return (false);
+		}
 		mutex_exit(&comp->tie.lock);
-		return (true);
+		break;
 	default:
-		return (true);
+		break;
 	}
+
+	return (true);
 }
 
 void
