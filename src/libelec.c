@@ -139,6 +139,7 @@ struct elec_comp_s {
 	uint64_t		integ_mask;
 
 	SERIALIZE_START_MARKER;
+	mutex_t			rw_ro_lock;
 	struct {
 		double		in_volts;
 		double		out_volts;
@@ -146,6 +147,16 @@ struct elec_comp_s {
 		double		out_amps;
 		double		in_pwr;		/* Watts */
 		double		out_pwr;	/* Watts */
+		bool		failed;
+		/*
+		 * Shorted components leak a lot of their energy out
+		 * to the environment and so we must avoid returning
+		 * the leakage to in libelec_comp_get_xxx. Other
+		 * parts of the system depend on those being the
+		 * actual useful work being done by the component.
+		 */
+		bool		shorted;
+		double		leak_factor;
 	} rw, ro;
 	SERIALIZE_END_MARKER;
 
@@ -416,6 +427,7 @@ libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 
 		comp->sys = sys;
 		comp->info = info;
+		mutex_init(&comp->rw_ro_lock);
 		VERIFY_MSG(avl_find(&sys->info2comp, comp, &where) == NULL,
 		    "Duplicate elec info usage %s", info->name);
 		avl_insert(&sys->info2comp, comp, where);
@@ -1346,43 +1358,73 @@ libelec_comp_get_conn(const elec_comp_t *comp, size_t i)
 double
 libelec_comp_get_in_volts(const elec_comp_t *comp)
 {
-	ASSERT(comp != NULL);
-	return (comp->ro.in_volts);
+	double volts;
+
+	mutex_enter((mutex_t *)&comp->rw_ro_lock);
+	volts = comp->ro.in_volts;
+	mutex_exit((mutex_t *)&comp->rw_ro_lock);
+
+	return (volts);
 }
 
 double
 libelec_comp_get_out_volts(const elec_comp_t *comp)
 {
-	ASSERT(comp != NULL);
-	return (comp->ro.out_volts);
+	double volts;
+
+	mutex_enter((mutex_t *)&comp->rw_ro_lock);
+	volts = comp->ro.out_volts;
+	mutex_exit((mutex_t *)&comp->rw_ro_lock);
+
+	return (volts);
 }
 
 double
 libelec_comp_get_in_amps(const elec_comp_t *comp)
 {
-	ASSERT(comp != NULL);
-	return (comp->ro.in_amps);
+	double amps;
+
+	mutex_enter((mutex_t *)&comp->rw_ro_lock);
+	amps = comp->ro.in_amps * (1 - comp->ro.leak_factor);
+	mutex_exit((mutex_t *)&comp->rw_ro_lock);
+
+	return (amps);
 }
 
 double
 libelec_comp_get_out_amps(const elec_comp_t *comp)
 {
-	ASSERT(comp != NULL);
-	return (comp->ro.out_amps);
+	double amps;
+
+	mutex_enter((mutex_t *)&comp->rw_ro_lock);
+	amps = comp->ro.out_amps * (1 - comp->ro.leak_factor);
+	mutex_exit((mutex_t *)&comp->rw_ro_lock);
+
+	return (amps);
 }
 
 double
 libelec_comp_get_in_pwr(const elec_comp_t *comp)
 {
-	ASSERT(comp != NULL);
-	return (comp->ro.in_pwr);
+	double watts;
+
+	mutex_enter((mutex_t *)&comp->rw_ro_lock);
+	watts = comp->ro.in_pwr * (1 - comp->ro.leak_factor);
+	mutex_exit((mutex_t *)&comp->rw_ro_lock);
+
+	return (watts);
 }
 
 double
 libelec_comp_get_out_pwr(const elec_comp_t *comp)
 {
-	ASSERT(comp != NULL);
-	return (comp->ro.out_pwr);
+	double watts;
+
+	mutex_enter((mutex_t *)&comp->rw_ro_lock);
+	watts = comp->ro.out_pwr * (1 - comp->ro.leak_factor);
+	mutex_exit((mutex_t *)&comp->rw_ro_lock);
+
+	return (watts);
 }
 
 double
@@ -1394,6 +1436,34 @@ libelec_comp_get_incap_volts(const elec_comp_t *comp)
 	return (comp->load.incap_U);
 }
 
+void
+libelec_comp_set_failed(elec_comp_t *comp, bool failed)
+{
+	ASSERT(comp != NULL);
+	comp->ro.failed = failed;
+}
+
+bool
+libelec_comp_get_failed(const elec_comp_t *comp)
+{
+	ASSERT(comp != NULL);
+	return (comp->ro.failed);
+}
+
+void
+libelec_comp_set_shorted(elec_comp_t *comp, bool shorted)
+{
+	ASSERT(comp != NULL);
+	comp->ro.shorted = shorted;
+}
+
+bool
+libelec_comp_get_shorted(const elec_comp_t *comp)
+{
+	ASSERT(comp != NULL);
+	return (comp->ro.shorted);
+}
+
 static void
 network_reset(elec_sys_t *sys)
 {
@@ -1403,10 +1473,23 @@ network_reset(elec_sys_t *sys)
 	    comp = list_next(&sys->comps, comp)) {
 		comp->upstream = NULL;
 		comp->src = NULL;
+
 		comp->rw.in_volts = 0;
 		comp->rw.in_amps = 0;
 		comp->rw.out_volts = 0;
 		comp->rw.out_amps = 0;
+
+		mutex_enter(&comp->rw_ro_lock);
+		comp->rw.failed = comp->ro.failed;
+		comp->rw.shorted = comp->ro.shorted;
+		if (comp->rw.shorted) {
+			comp->rw.leak_factor = wavg(0.9, 0.999,
+			    crc64_rand_fract());
+		} else {
+			comp->rw.leak_factor = 0;
+		}
+		mutex_exit(&comp->rw_ro_lock);
+
 		comp->integ_mask = 0;
 		switch (comp->info->type) {
 		case ELEC_LOAD:
@@ -1456,9 +1539,14 @@ network_update_gen(elec_comp_t *gen, double d_t)
 	FILTER_IN(gen->gen.stab_factor, stab_factor, d_t,
 	    gen->info->gen.stab_rate);
 
-	gen->rw.in_volts = (rpm / gen->gen.ctr_rpm) * gen->gen.stab_factor *
-	    gen->info->gen.volts;
-	gen->rw.out_volts = gen->rw.in_volts;
+	if (!gen->rw.failed) {
+		gen->rw.in_volts = (rpm / gen->gen.ctr_rpm) *
+		    gen->gen.stab_factor * gen->info->gen.volts;
+		gen->rw.out_volts = gen->rw.in_volts;
+	} else {
+		gen->rw.in_volts = 0;
+		gen->rw.out_volts = 0;
+	}
 }
 
 static void
@@ -1507,8 +1595,13 @@ network_update_batt(elec_comp_t *batt, double d_t)
 	J -= U * batt->batt.prev_amps * d_t;
 
 	/* Recalculate the new voltage and relative charge state */
-	batt->rw.in_volts = U;
-	batt->rw.out_volts = U;
+	if (!batt->rw.failed) {
+		batt->rw.in_volts = U;
+		batt->rw.out_volts = U;
+	} else {
+		batt->rw.in_volts = 0;
+		batt->rw.out_volts = 0;
+	}
 	batt->batt.chg_rel = J / J_max;
 }
 
@@ -1563,6 +1656,8 @@ load_incap_update(elec_comp_t *comp, double d_t)
 	d_Q = comp->load.incap_d_Q - info->load.incap_leak_Qps * d_t;
 	comp->load.incap_U += d_Q / info->load.incap_C;
 	comp->load.incap_U = MAX(comp->load.incap_U, 0);
+	if (comp->rw.failed)
+		comp->load.incap_U = 0;
 }
 
 static void
@@ -1607,7 +1702,11 @@ network_paint_src_bus(elec_comp_t *src, elec_comp_t *upstream,
 	if (comp->rw.in_volts < src->rw.out_volts) {
 		comp->src = src;
 		comp->upstream = upstream;
-		comp->rw.in_volts = src->rw.out_volts;
+
+		if (!comp->rw.failed)
+			comp->rw.in_volts = src->rw.out_volts;
+		else
+			comp->rw.in_volts = 0;
 
 		for (unsigned i = 0; i < comp->bus.n_comps; i++) {
 			if (upstream != comp->bus.comps[i]) {
@@ -1640,6 +1739,8 @@ network_paint_src_tie(elec_comp_t *src, elec_comp_t *upstream,
 					comp->upstream = upstream;
 					comp->rw.in_volts = src->rw.out_volts;
 				}
+				if (comp->rw.failed)
+					comp->rw.in_volts = 0;
 				tied = true;
 			}
 			found = true;
@@ -1673,9 +1774,14 @@ network_paint_src_tru(elec_comp_t *src, elec_comp_t *upstream,
 	if (upstream == comp->tru.ac && comp->rw.in_volts < src->rw.out_volts) {
 		comp->src = src;
 		comp->upstream = upstream;
-		comp->rw.in_volts = src->rw.out_volts;
-		comp->rw.out_volts = comp->info->tru.out_volts *
-		    (comp->rw.in_volts / comp->info->tru.in_volts);
+		if (!comp->rw.failed) {
+			comp->rw.in_volts = src->rw.out_volts;
+			comp->rw.out_volts = comp->info->tru.out_volts *
+			    (comp->rw.in_volts / comp->info->tru.in_volts);
+		} else {
+			comp->rw.in_volts = 0;
+			comp->rw.out_volts = 0;
+		}
 		ASSERT(comp->tru.dc != NULL);
 		network_paint_src_comp(comp, comp, comp->tru.dc, depth + 1);
 	}
@@ -1695,7 +1801,10 @@ network_paint_src_cb(elec_comp_t *src, elec_comp_t *upstream,
 	if (comp->cb.wk_set && comp->rw.in_volts < src->rw.out_volts) {
 		comp->src = src;
 		comp->upstream = upstream;
-		comp->rw.in_volts = src->rw.out_volts;
+		if (!comp->rw.failed)
+			comp->rw.in_volts = src->rw.out_volts;
+		else
+			comp->rw.in_volts = 0;
 		if (upstream == comp->cb.sides[0]) {
 			ASSERT(comp->cb.sides[1] != NULL);
 			network_paint_src_comp(src, comp, comp->cb.sides[1],
@@ -1724,7 +1833,10 @@ network_paint_src_diode(elec_comp_t *src, elec_comp_t *upstream,
 	    comp->rw.in_volts < src->rw.out_volts) {
 		comp->src = src;
 		comp->upstream = upstream;
-		comp->rw.in_volts = src->rw.out_volts;
+		if (!comp->rw.failed)
+			comp->rw.in_volts = src->rw.out_volts;
+		else
+			comp->rw.in_volts = 0;
 		network_paint_src_comp(src, comp, comp->diode.sides[1],
 		    depth + 1);
 	}
@@ -1759,7 +1871,10 @@ network_paint_src_comp(elec_comp_t *src, elec_comp_t *upstream,
 		if (comp->rw.in_volts < src->rw.out_volts) {
 			comp->src = src;
 			comp->upstream = upstream;
-			comp->rw.in_volts = src->rw.out_volts;
+			if (!comp->rw.failed)
+				comp->rw.in_volts = src->rw.out_volts;
+			else
+				comp->rw.in_volts = 0;
 		}
 		break;
 	case ELEC_CB:
@@ -1824,6 +1939,11 @@ network_load_integrate_tru(elec_comp_t *comp, unsigned depth,
 	network_load_integrate_comp(comp, comp, comp->tru.dc, depth + 1,
 	    src_mask, d_t);
 
+	if (comp->rw.failed || comp->rw.in_volts == 0) {
+		comp->rw.in_amps = 0;
+		comp->rw.out_amps = 0;
+		return;
+	}
 	comp->rw.out_amps = comp->tru.dc->rw.in_amps;
 	eff = fx_lin_multi(comp->rw.out_amps, comp->info->tru.eff_curve,
 	    true);
@@ -1875,7 +1995,18 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 	} else {
 		load_I = load_WorI;
 	}
-
+	if (comp->rw.shorted) {
+		/*
+		 * Shorted components randomly consume 10-100x their
+		 * nominal power.
+		 */
+		load_I *= wavg(10, 100, crc64_rand_fract());
+	} else if (comp->rw.failed) {
+		/*
+		 * Failed components just drop their power consumption to zero
+		 */
+		load_I = 0;
+	}
 	/*
 	 * When the input voltage is greater than the input capacitance
 	 * voltage, we will be charging up the input capacitance.
@@ -2164,7 +2295,9 @@ network_state_xfer(elec_sys_t *sys)
 {
 	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
 	    comp = list_next(&sys->comps, comp)) {
+		mutex_enter(&comp->rw_ro_lock);
 		comp->ro = comp->rw;
+		mutex_exit(&comp->rw_ro_lock);
 	}
 }
 
@@ -2234,6 +2367,7 @@ comp_free(elec_comp_t *comp)
 		free(comp->tie.wk_state);
 		mutex_destroy(&comp->tie.lock);
 	}
+	mutex_destroy(&comp->rw_ro_lock);
 
 	free(comp);
 }

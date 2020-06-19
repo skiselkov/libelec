@@ -168,6 +168,11 @@ double libelec_comp_get_in_pwr(const elec_comp_t *comp);
 double libelec_comp_get_out_pwr(const elec_comp_t *comp);
 double libelec_comp_get_incap_volts(const elec_comp_t *comp);
 
+void libelec_comp_set_failed(elec_comp_t *comp, bool failed);
+bool libelec_comp_get_failed(const elec_comp_t *comp);
+void libelec_comp_set_shorted(elec_comp_t *comp, bool shorted);
+bool libelec_comp_get_shorted(const elec_comp_t *comp);
+
 void libelec_cb_set(elec_comp_t *comp, bool set);
 bool libelec_cb_get(const elec_comp_t *comp);
 double libelec_cb_get_temp(const elec_comp_t *comp);
