@@ -15,6 +15,10 @@
 #include <stdarg.h>
 #include <stddef.h>
 
+#ifdef	XPLANE
+#include <XPLMDisplay.h>
+#endif
+
 #include <acfutils/avl.h>
 #include <acfutils/crc64.h>
 #include <acfutils/math.h>
@@ -42,6 +46,19 @@ struct elec_sys_s {
 	bool		started;
 	worker_t	worker;
 	mutex_t		worker_interlock;
+
+	mutex_t		paused_lock;
+	bool		paused;		/* protected by paused_lock */
+	double		time_factor;	/* only accessed from main thread */
+#ifdef	XPLANE
+	double		prev_sim_time;
+struct {
+		dr_t	paused;
+		dr_t	replay;
+		dr_t	sim_speed_act;
+		dr_t	sim_time;
+	} drs;
+#endif	/* defined(XPLANE) */
 
 	avl_tree_t	info2comp;
 	avl_tree_t	name2comp;
@@ -206,6 +223,52 @@ static void network_load_integrate_comp(const elec_comp_t *src,
     uint64_t src_mask, double d_t);
 static void network_load_integrate_load(elec_comp_t *comp, unsigned depth,
     double d_t);
+
+#ifdef	XPLANE
+/*
+ * When X-Plane is in a modal UI window (such as the weather setup
+ * screen, or user settings) flight loop callbacks are never called.
+ * But window callbacks are, so we piggyback onto the Window draw
+ * callback to figure out if the sim is paused or not.
+ */
+static int
+elec_draw_cb(XPLMDrawingPhase phase, int before, void *refcon)
+{
+	elec_sys_t *sys;
+	double sim_time, time_factor;
+
+	UNUSED(phase);
+	UNUSED(before);
+	ASSERT(refcon != NULL);
+	sys = refcon;
+
+	sim_time = dr_getf(&sys->drs.sim_time);
+	time_factor = round(dr_getf(&sys->drs.sim_speed_act) * 10) / 10;
+	if (sys->prev_sim_time >= sim_time || dr_geti(&sys->drs.replay) != 0 ||
+	    dr_geti(&sys->drs.paused) != 0 || time_factor == 0) {
+		mutex_enter(&sys->paused_lock);
+		sys->paused = true;
+		mutex_exit(&sys->paused_lock);
+		return (1);
+	}
+	sys->paused = false;
+	/*
+	 * If the time factor returns to 1.0x, we want to make sure we
+	 * go back to 1.0x exactly, instead of some fractional 1.04x thing
+	 * in case the sim was only ever so slightly accelerated/decelerated.
+	 */
+	if (time_factor != sys->time_factor ||
+	    (time_factor == 1 && sys->time_factor != 1)) {
+		sys->time_factor = time_factor;
+		if (sys->started) {
+			worker_set_interval_nowake(&sys->worker,
+			    EXEC_INTVAL / time_factor);
+		}
+	}
+
+	return (1);
+}
+#endif	/* defined(XPLANE) */
 
 static int
 user_cb_info_compar(const void *a, const void *b)
@@ -419,6 +482,8 @@ libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 	avl_create(&sys->user_cbs, user_cb_info_compar,
 	    sizeof (user_cb_info_t), offsetof(user_cb_info_t, node));
 	mutex_init(&sys->worker_interlock);
+	mutex_init(&sys->paused_lock);
+	sys->time_factor = 1;
 
 	for (size_t i = 0; i < num_infos; i++) {
 		elec_comp_t *comp = safe_calloc(1, sizeof (*comp));
@@ -516,6 +581,14 @@ libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 	/* Resolve component links */
 	resolve_comp_links(sys);
 	check_comp_links(sys);
+
+#ifdef	XPLANE
+	fdr_find(&sys->drs.sim_speed_act, "sim/time/sim_speed_actual");
+	fdr_find(&sys->drs.sim_time, "sim/time/total_running_time_sec");
+	fdr_find(&sys->drs.paused, "sim/time/paused");
+	fdr_find(&sys->drs.replay, "sim/time/is_in_replay");
+	XPLMRegisterDrawCallback(elec_draw_cb, xplm_Phase_Window, 0, sys);
+#endif	/* defined(XPLANE) */
 
 	return (sys);
 }
@@ -708,7 +781,13 @@ libelec_destroy(elec_sys_t *sys)
 	list_destroy(&sys->comps);
 
 	mutex_destroy(&sys->worker_interlock);
+	mutex_destroy(&sys->paused_lock);
 
+#ifdef	XPLANE
+	XPLMUnregisterDrawCallback(elec_draw_cb, xplm_Phase_Window, 0, sys);
+#endif
+
+	memset(sys, 0, sizeof (*sys));
 	free(sys);
 }
 
@@ -2309,6 +2388,13 @@ elec_sys_worker(void *userinfo)
 
 	ASSERT(userinfo != NULL);
 	sys = userinfo;
+
+	mutex_enter(&sys->paused_lock);
+	if (sys->paused) {
+		mutex_exit(&sys->paused_lock);
+		return (B_TRUE);
+	}
+	mutex_exit(&sys->paused_lock);
 
 	mutex_enter(&sys->worker_interlock);
 
