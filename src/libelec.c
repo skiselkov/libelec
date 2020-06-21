@@ -587,7 +587,8 @@ libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 	fdr_find(&sys->drs.sim_time, "sim/time/total_running_time_sec");
 	fdr_find(&sys->drs.paused, "sim/time/paused");
 	fdr_find(&sys->drs.replay, "sim/time/is_in_replay");
-	XPLMRegisterDrawCallback(elec_draw_cb, xplm_Phase_Window, 0, sys);
+	VERIFY(XPLMRegisterDrawCallback(elec_draw_cb, xplm_Phase_Window,
+	    0, sys));
 #endif	/* defined(XPLANE) */
 
 	return (sys);
@@ -784,7 +785,8 @@ libelec_destroy(elec_sys_t *sys)
 	mutex_destroy(&sys->paused_lock);
 
 #ifdef	XPLANE
-	XPLMUnregisterDrawCallback(elec_draw_cb, xplm_Phase_Window, 0, sys);
+	VERIFY(XPLMUnregisterDrawCallback(elec_draw_cb, xplm_Phase_Window,
+	    0, sys));
 #endif
 
 	memset(sys, 0, sizeof (*sys));
