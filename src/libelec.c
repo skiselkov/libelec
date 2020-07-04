@@ -1441,6 +1441,8 @@ libelec_comp_get_in_volts(const elec_comp_t *comp)
 {
 	double volts;
 
+	ASSERT(comp != NULL);
+
 	mutex_enter((mutex_t *)&comp->rw_ro_lock);
 	volts = comp->ro.in_volts;
 	mutex_exit((mutex_t *)&comp->rw_ro_lock);
@@ -1452,6 +1454,8 @@ double
 libelec_comp_get_out_volts(const elec_comp_t *comp)
 {
 	double volts;
+
+	ASSERT(comp != NULL);
 
 	mutex_enter((mutex_t *)&comp->rw_ro_lock);
 	volts = comp->ro.out_volts;
@@ -1465,6 +1469,8 @@ libelec_comp_get_in_amps(const elec_comp_t *comp)
 {
 	double amps;
 
+	ASSERT(comp != NULL);
+
 	mutex_enter((mutex_t *)&comp->rw_ro_lock);
 	amps = comp->ro.in_amps * (1 - comp->ro.leak_factor);
 	mutex_exit((mutex_t *)&comp->rw_ro_lock);
@@ -1476,6 +1482,8 @@ double
 libelec_comp_get_out_amps(const elec_comp_t *comp)
 {
 	double amps;
+
+	ASSERT(comp != NULL);
 
 	mutex_enter((mutex_t *)&comp->rw_ro_lock);
 	amps = comp->ro.out_amps * (1 - comp->ro.leak_factor);
@@ -1489,6 +1497,8 @@ libelec_comp_get_in_pwr(const elec_comp_t *comp)
 {
 	double watts;
 
+	ASSERT(comp != NULL);
+
 	mutex_enter((mutex_t *)&comp->rw_ro_lock);
 	watts = comp->ro.in_pwr * (1 - comp->ro.leak_factor);
 	mutex_exit((mutex_t *)&comp->rw_ro_lock);
@@ -1500,6 +1510,8 @@ double
 libelec_comp_get_out_pwr(const elec_comp_t *comp)
 {
 	double watts;
+
+	ASSERT(comp != NULL);
 
 	mutex_enter((mutex_t *)&comp->rw_ro_lock);
 	watts = comp->ro.out_pwr * (1 - comp->ro.leak_factor);
