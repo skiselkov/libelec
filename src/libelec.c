@@ -815,6 +815,9 @@ libelec_create_cb_switches(const elec_sys_t *sys, const char *prefix,
 			    sizeof (desc));
 			comp->cb.sw = libswitch_add_toggle(name, desc,
 			    anim_rate);
+			/* Invert the CB so '0' is popped and '1' is pushed */
+			libswitch_set_anim_offset(comp->cb.sw, -1, 1);
+			libswitch_set(comp->cb.sw, 0);
 		}
 	}
 }
