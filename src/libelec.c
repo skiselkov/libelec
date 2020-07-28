@@ -243,7 +243,8 @@ elec_draw_cb(XPLMDrawingPhase phase, int before, void *refcon)
 	sys = refcon;
 
 	sim_time = dr_getf_prot(&sys->drs.sim_time);
-	time_factor = round(dr_getf_prot(&sys->drs.sim_speed_act) * 10) / 10;
+	/* Caution: sim_speed_act likes to contain a NAN while paused */
+	time_factor = round(dr_getf(&sys->drs.sim_speed_act) * 10) / 10;
 	if (sys->prev_sim_time >= sim_time || dr_geti(&sys->drs.replay) != 0 ||
 	    dr_geti(&sys->drs.paused) != 0 || time_factor == 0) {
 		mutex_enter(&sys->paused_lock);
