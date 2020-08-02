@@ -214,6 +214,18 @@ typedef struct {
 	avl_node_t	node;
 } user_cb_info_t;
 
+static const vect2_t batt_temp_energy_curve[] = {
+    VECT2(C2KELVIN(-90), 0),
+    VECT2(C2KELVIN(-75), 0.0),
+    VECT2(C2KELVIN(-50), 0.125),
+    VECT2(C2KELVIN(-20), 0.45),
+    VECT2(C2KELVIN(-5), 0.7),
+    VECT2(C2KELVIN(15), 0.925),
+    VECT2(C2KELVIN(40), 1.0),
+    VECT2(C2KELVIN(50), 1.0),
+    NULL_VECT2
+};
+
 static bool_t elec_sys_worker(void *userinfo);
 static void comp_free(elec_comp_t *comp);
 static void network_paint_src_comp(elec_comp_t *src, elec_comp_t *upstream,
@@ -1649,28 +1661,6 @@ network_update_gen(elec_comp_t *gen, double d_t)
 static void
 network_update_batt(elec_comp_t *batt, double d_t)
 {
-	const vect2_t chg_volt_curve[] = {
-	    VECT2(0.00, 0.00),
-	    VECT2(0.04, 0.70),
-	    VECT2(0.10, 0.80),
-	    VECT2(0.20, 0.87),
-	    VECT2(0.30, 0.91),
-	    VECT2(0.45, 0.94),
-	    VECT2(0.60, 0.95),
-	    VECT2(0.80, 0.96),
-	    VECT2(0.90, 0.97),
-	    VECT2(1.00, 1.00),
-	    NULL_VECT2
-	};
-	const vect2_t temp_energy_curve[] = {
-	    VECT2(0, 0),
-	    VECT2(C2KELVIN(-75), 0.0),
-	    VECT2(C2KELVIN(-50), 0.25),
-	    VECT2(C2KELVIN(15), 0.95),
-	    VECT2(C2KELVIN(40), 1.0),
-	    VECT2(C2KELVIN(50), 1.0),
-	    NULL_VECT2
-	};
 	double U, J, T, temp_coeff, J_max, I_max, I_rel;
 
 	ASSERT(batt != NULL);
@@ -1680,12 +1670,12 @@ network_update_batt(elec_comp_t *batt, double d_t)
 
 	T = batt->info->batt.get_temp(batt);
 	ASSERT3F(T, >, 0);
-	temp_coeff = fx_lin_multi(T, temp_energy_curve, true);
+	temp_coeff = fx_lin_multi(T, batt_temp_energy_curve, true);
 
 	I_max = batt->info->batt.max_pwr / batt->info->batt.volts;
 	I_rel = batt->batt.prev_amps / I_max;
-	U = batt->info->batt.volts * (1 - pow(I_rel, 1.45)) *
-	    fx_lin_multi(batt->batt.chg_rel, chg_volt_curve, true);
+	U = libelec_phys_get_batt_voltage(batt->info->batt.volts,
+	    batt->batt.chg_rel, I_rel);
 
 	J_max = batt->info->batt.capacity * temp_coeff;
 	J = batt->batt.chg_rel * J_max;
@@ -2678,4 +2668,27 @@ libelec_batt_get_chg_rel(const elec_comp_t *comp)
 	ASSERT(comp->info != NULL);
 	ASSERT3U(comp->info->type, ==, ELEC_BATT);
 	return (comp->batt.chg_rel);
+}
+
+double
+libelec_phys_get_batt_voltage(double U_nominal, double chg_rel, double I_rel)
+{
+	static const vect2_t chg_volt_curve[] = {
+	    VECT2(0.00, 0.00),
+	    VECT2(0.04, 0.70),
+	    VECT2(0.10, 0.80),
+	    VECT2(0.20, 0.87),
+	    VECT2(0.30, 0.91),
+	    VECT2(0.45, 0.94),
+	    VECT2(0.60, 0.95),
+	    VECT2(0.80, 0.96),
+	    VECT2(0.90, 0.97),
+	    VECT2(1.00, 1.00),
+	    NULL_VECT2
+	};
+	ASSERT3F(U_nominal, >, 0);
+	ASSERT3F(chg_rel, >=, 0);
+	ASSERT3F(chg_rel, <=, 1);
+	return (U_nominal * (1 - clamp(pow(I_rel, 1.45), 0, 1)) *
+	    fx_lin_multi(chg_rel, chg_volt_curve, true));
 }

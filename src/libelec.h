@@ -188,6 +188,10 @@ size_t libelec_tie_get_num_buses(const elec_comp_t *comp);
 
 double libelec_batt_get_chg_rel(const elec_comp_t *comp);
 
+double libelec_phys_get_chg_rel(double J_ideal, double T_batt);
+double libelec_phys_get_batt_voltage(double U_nominal, double chg_rel,
+    double I_rel);
+
 #ifdef __cplusplus
 }
 #endif
