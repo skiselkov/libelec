@@ -382,10 +382,20 @@ resolve_bus_links(elec_sys_t *sys, elec_comp_t *bus)
 			if (comp->cb.sides[0] == NULL) {
 				comp->cb.sides[0] = bus;
 			} else {
+				elec_comp_t *other_bus = comp->cb.sides[0];
+
 				ASSERT_MSG(comp->cb.sides[1] == NULL,
 				    "Too many connections to %s",
 				    comp->info->name);
 				comp->cb.sides[1] = bus;
+				ASSERT_MSG(bus->info->bus.ac ==
+				    other_bus->info->bus.ac, "%s is linking "
+				    "two buses of incompatible type (%s is "
+				    "%s and %s is %s)",
+				    comp->info->name, bus->info->name,
+				    bus->info->bus.ac ? "AC" : "DC",
+				    other_bus->info->name,
+				    other_bus->info->bus.ac ? "AC" : "DC");
 			}
 			break;
 		case ELEC_TIE:
