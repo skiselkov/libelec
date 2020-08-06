@@ -18,6 +18,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 
+#include <acfutils/mt_cairo_render.h>
 #include <acfutils/conf.h>
 #include <acfutils/geom.h>
 #include <acfutils/sysmacros.h>
@@ -94,6 +95,7 @@ typedef struct {
 typedef struct {
 	double			max_amps;
 	double			rate;		/* heating rate */
+	bool			fuse;
 } elec_cb_info_t;
 
 typedef struct {

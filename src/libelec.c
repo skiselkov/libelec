@@ -1283,6 +1283,9 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 		} else if (strcmp(cmd, "STD_LOAD") == 0 && n_comps == 2 &&
 		    info != NULL && info->type == ELEC_LOAD) {
 			info->load.std_load = atof(comps[1]);
+		} else if (strcmp(cmd, "FUSE") == 0 && n_comps == 1 &&
+		    info != NULL && info->type == ELEC_CB) {
+			info->cb.fuse = true;
 		} else {
 			logMsg("%s:%d: unknown or malformed line",
 			    filename, linenum);
@@ -1732,8 +1735,11 @@ network_update_cb(elec_comp_t *cb, double d_t)
 	amps_rat = cb->rw.out_amps / cb->info->cb.max_amps;
 	FILTER_IN(cb->scb.temp, amps_rat, d_t, cb->info->cb.rate);
 
-	if (cb->scb.temp >= 1.0)
+	if (cb->scb.temp >= 1.0) {
 		cb->scb.cur_set = cb->scb.wk_set = false;
+		if (cb->info->cb.fuse)
+			cb->rw.failed = true;
+	}
 }
 
 static void
@@ -1912,13 +1918,12 @@ network_paint_src_scb(elec_comp_t *src, elec_comp_t *upstream,
 	ASSERT(comp->info->type == ELEC_CB || comp->info->type == ELEC_SHUNT);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
-	if (comp->scb.wk_set && comp->rw.in_volts < src->rw.out_volts) {
+	if (!comp->rw.failed && comp->scb.wk_set &&
+	    comp->rw.in_volts < src->rw.out_volts) {
 		comp->src = src;
 		comp->upstream = upstream;
-		if (!comp->rw.failed)
-			comp->rw.in_volts = src->rw.out_volts;
-		else
-			comp->rw.in_volts = 0;
+		comp->rw.in_volts = src->rw.out_volts;
+		comp->rw.out_volts = src->rw.out_volts;
 		if (upstream == comp->scb.sides[0]) {
 			ASSERT(comp->scb.sides[1] != NULL);
 			network_paint_src_comp(src, comp, comp->scb.sides[1],
