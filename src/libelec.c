@@ -120,7 +120,7 @@ typedef struct {
 	bool_t		wk_set;
 	double		temp;		/* relative 0.0 - 1.0 */
 	SERIALIZE_END_MARKER;
-} elec_cb_t;
+} elec_scb_t;
 
 typedef struct {
 	size_t		n_buses;
@@ -186,7 +186,7 @@ struct elec_comp_s {
 		elec_tru_t	tru;
 		elec_load_t	load;
 		elec_bus_t	bus;
-		elec_cb_t	cb;
+		elec_scb_t	scb;
 		elec_tie_t	tie;
 		elec_diode_t	diode;
 	};
@@ -379,15 +379,16 @@ resolve_bus_links(elec_sys_t *sys, elec_comp_t *bus)
 			    comp->info->name);
 			break;
 		case ELEC_CB:
-			if (comp->cb.sides[0] == NULL) {
-				comp->cb.sides[0] = bus;
+		case ELEC_SHUNT:
+			if (comp->scb.sides[0] == NULL) {
+				comp->scb.sides[0] = bus;
 			} else {
-				elec_comp_t *other_bus = comp->cb.sides[0];
+				elec_comp_t *other_bus = comp->scb.sides[0];
 
-				ASSERT_MSG(comp->cb.sides[1] == NULL,
+				ASSERT_MSG(comp->scb.sides[1] == NULL,
 				    "Too many connections to %s",
 				    comp->info->name);
-				comp->cb.sides[1] = bus;
+				comp->scb.sides[1] = bus;
 				ASSERT_MSG(bus->info->bus.ac ==
 				    other_bus->info->bus.ac, "%s is linking "
 				    "two buses of incompatible type (%s is "
@@ -471,8 +472,9 @@ check_comp_links(elec_sys_t *sys)
 			CHECK_LINK(comp->bus.comps);
 			break;
 		case ELEC_CB:
-			CHECK_LINK(comp->cb.sides[0]);
-			CHECK_LINK(comp->cb.sides[1]);
+		case ELEC_SHUNT:
+			CHECK_LINK(comp->scb.sides[0]);
+			CHECK_LINK(comp->scb.sides[1]);
 			break;
 		case ELEC_TIE:
 			CHECK_LINK(comp->tie.buses);
@@ -574,7 +576,8 @@ libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 			ASSERT(comp->info->bus.comps != NULL);
 			break;
 		case ELEC_CB:
-			comp->cb.cur_set = comp->cb.wk_set = true;
+		case ELEC_SHUNT:
+			comp->scb.cur_set = comp->scb.wk_set = true;
 			break;
 		case ELEC_TIE:
 			mutex_init(&comp->tie.lock);
@@ -669,8 +672,11 @@ elec_comp_serialize(elec_comp_t *comp, conf_t *ser, const char *prefix)
 		    prefix, comp->info->name);
 		break;
 	case ELEC_CB:
-		SERIALIZE_DATA_V(&comp->cb, ser, "%s/%s/cb",
+		SERIALIZE_DATA_V(&comp->scb, ser, "%s/%s/cb",
 		    prefix, comp->info->name);
+		break;
+	case ELEC_SHUNT:
+		/* Nothing to serialize for a shunt */
 		break;
 	case ELEC_TIE:
 		mutex_enter(&comp->tie.lock);
@@ -710,8 +716,11 @@ elec_comp_deserialize(elec_comp_t *comp, const conf_t *ser, const char *prefix)
 		    prefix, comp->info->name);
 		break;
 	case ELEC_CB:
-		DESERIALIZE_DATA_V(&comp->cb, ser, "%s/%s/cb",
+		DESERIALIZE_DATA_V(&comp->scb, ser, "%s/%s/cb",
 		    prefix, comp->info->name);
+		break;
+	case ELEC_SHUNT:
+		/* Nothing to deserialize for a shunt */
 		break;
 	case ELEC_TIE:
 		mutex_enter(&comp->tie.lock);
@@ -836,11 +845,11 @@ libelec_create_cb_switches(const elec_sys_t *sys, const char *prefix,
 			VERIFY3S(snprintf(desc, sizeof (desc),
 			    "Circuit breaker %s", comp->info->name), <,
 			    sizeof (desc));
-			comp->cb.sw = libswitch_add_toggle(name, desc,
+			comp->scb.sw = libswitch_add_toggle(name, desc,
 			    anim_rate);
 			/* Invert the CB so '0' is popped and '1' is pushed */
-			libswitch_set_anim_offset(comp->cb.sw, -1, 1);
-			libswitch_set(comp->cb.sw, 0);
+			libswitch_set_anim_offset(comp->scb.sw, -1, 1);
+			libswitch_set(comp->scb.sw, 0);
 		}
 	}
 }
@@ -874,6 +883,8 @@ comp_type2str(elec_comp_type_t type)
 		return ("BUS");
 	case ELEC_CB:
 		return ("CB");
+	case ELEC_SHUNT:
+		return ("SHUNT");
 	case ELEC_TIE:
 		return ("TIE");
 	case ELEC_DIODE:
@@ -991,6 +1002,7 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 		    strncmp(line, "LOAD ", 5) == 0 ||
 		    strncmp(line, "BUS ", 4) == 0 ||
 		    strncmp(line, "CB ", 3) == 0 ||
+		    strncmp(line, "SHUNT ", 6) == 0 ||
 		    strncmp(line, "TIE ", 4) == 0 ||
 		    strncmp(line, "DIODE ", 6) == 0) {
 			num_comps++;
@@ -1082,6 +1094,12 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 			info->name = strdup(comps[1]);
 			info->cb.rate = 1;
 			info->cb.max_amps = atof(comps[2]);
+		} else if (strcmp(cmd, "SHUNT") == 0 && n_comps == 2) {
+			ASSERT3U(comp_i, <, num_comps);
+			CHECK_DUP_NAME(comps[1]);
+			info = &infos[comp_i++];
+			info->type = ELEC_SHUNT;
+			info->name = strdup(comps[1]);
 		} else if (strcmp(cmd, "TIE") == 0 && n_comps == 2) {
 			ASSERT3U(comp_i, <, num_comps);
 			CHECK_DUP_NAME(comps[1]);
@@ -1415,6 +1433,7 @@ libelec_comp_get_num_conns(const elec_comp_t *comp)
 		return (comp->tie.n_buses);
 	case ELEC_TRU:
 	case ELEC_CB:
+	case ELEC_SHUNT:
 	case ELEC_DIODE:
 		return (2);
 	default:
@@ -1449,14 +1468,12 @@ libelec_comp_get_conn(const elec_comp_t *comp, size_t i)
 		ASSERT3U(i, <, comp->bus.n_comps);
 		return (comp->bus.comps[i]);
 	case ELEC_CB:
+	case ELEC_SHUNT:
 		ASSERT3U(i, <, 2);
-		return (comp->cb.sides[i]);
-	case ELEC_TIE:
-		ASSERT3U(i, <, comp->tie.n_buses);
-		return (comp->tie.buses[i]);
+		return (comp->scb.sides[i]);
 	case ELEC_DIODE:
 		ASSERT3U(i, <, 2);
-		return (comp->cb.sides[i]);
+		return (comp->scb.sides[i]);
 	default:
 		VERIFY(0);
 	}
@@ -1623,12 +1640,12 @@ network_reset(elec_sys_t *sys)
 			break;
 		case ELEC_CB:
 #ifndef	LIBELEC_NO_LIBSWITCH
-			if (comp->cb.sw != NULL) {
-				comp->cb.cur_set =
-				    !libswitch_read(comp->cb.sw, NULL);
+			if (comp->scb.sw != NULL) {
+				comp->scb.cur_set =
+				    !libswitch_read(comp->scb.sw, NULL);
 			}
 #endif	/* LIBELEC_NO_LIBSWITCH */
-			comp->cb.wk_set = comp->cb.cur_set;
+			comp->scb.wk_set = comp->scb.cur_set;
 			break;
 		default:
 			break;
@@ -1713,10 +1730,10 @@ network_update_cb(elec_comp_t *cb, double d_t)
 	ASSERT3F(cb->info->cb.max_amps, >, 0);
 
 	amps_rat = cb->rw.out_amps / cb->info->cb.max_amps;
-	FILTER_IN(cb->cb.temp, amps_rat, d_t, cb->info->cb.rate);
+	FILTER_IN(cb->scb.temp, amps_rat, d_t, cb->info->cb.rate);
 
-	if (cb->cb.temp >= 1.0)
-		cb->cb.cur_set = cb->cb.wk_set = false;
+	if (cb->scb.temp >= 1.0)
+		cb->scb.cur_set = cb->scb.wk_set = false;
 }
 
 static void
@@ -1885,31 +1902,31 @@ network_paint_src_tru(elec_comp_t *src, elec_comp_t *upstream,
 }
 
 static void
-network_paint_src_cb(elec_comp_t *src, elec_comp_t *upstream,
+network_paint_src_scb(elec_comp_t *src, elec_comp_t *upstream,
     elec_comp_t *comp, unsigned depth)
 {
 	ASSERT(src != NULL);
 	ASSERT(upstream != NULL);
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
-	ASSERT3U(comp->info->type, ==, ELEC_CB);
+	ASSERT(comp->info->type == ELEC_CB || comp->info->type == ELEC_SHUNT);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
-	if (comp->cb.wk_set && comp->rw.in_volts < src->rw.out_volts) {
+	if (comp->scb.wk_set && comp->rw.in_volts < src->rw.out_volts) {
 		comp->src = src;
 		comp->upstream = upstream;
 		if (!comp->rw.failed)
 			comp->rw.in_volts = src->rw.out_volts;
 		else
 			comp->rw.in_volts = 0;
-		if (upstream == comp->cb.sides[0]) {
-			ASSERT(comp->cb.sides[1] != NULL);
-			network_paint_src_comp(src, comp, comp->cb.sides[1],
+		if (upstream == comp->scb.sides[0]) {
+			ASSERT(comp->scb.sides[1] != NULL);
+			network_paint_src_comp(src, comp, comp->scb.sides[1],
 			    depth + 1);
 		} else {
-			ASSERT3P(upstream, ==, comp->cb.sides[1]);
-			ASSERT(comp->cb.sides[0] != NULL);
-			network_paint_src_comp(src, comp, comp->cb.sides[0],
+			ASSERT3P(upstream, ==, comp->scb.sides[1]);
+			ASSERT(comp->scb.sides[0] != NULL);
+			network_paint_src_comp(src, comp, comp->scb.sides[0],
 			    depth + 1);
 		}
 	}
@@ -1975,7 +1992,8 @@ network_paint_src_comp(elec_comp_t *src, elec_comp_t *upstream,
 		}
 		break;
 	case ELEC_CB:
-		network_paint_src_cb(src, upstream, comp, depth);
+	case ELEC_SHUNT:
+		network_paint_src_scb(src, upstream, comp, depth);
 		break;
 	case ELEC_TIE:
 		network_paint_src_tie(src, upstream, comp, depth);
@@ -2280,26 +2298,26 @@ network_load_integrate_tie(const elec_comp_t *src, elec_comp_t *comp,
 }
 
 static void
-network_load_integrate_cb(const elec_comp_t *src, elec_comp_t *comp,
+network_load_integrate_scb(const elec_comp_t *src, elec_comp_t *comp,
     unsigned depth, uint64_t src_mask, double d_t)
 {
 	ASSERT(src != NULL);
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
-	ASSERT3U(comp->info->type, ==, ELEC_CB);
+	ASSERT(comp->info->type == ELEC_CB || comp->info->type == ELEC_SHUNT);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
-	if (!comp->cb.wk_set)
+	if (!comp->scb.wk_set)
 		return;
-	if (comp->upstream == comp->cb.sides[0]) {
+	if (comp->upstream == comp->scb.sides[0]) {
 		network_load_integrate_comp(src, comp,
-		    comp->cb.sides[1], depth + 1, src_mask, d_t);
-		comp->rw.out_amps = comp->cb.sides[1]->rw.in_amps;
+		    comp->scb.sides[1], depth + 1, src_mask, d_t);
+		comp->rw.out_amps = comp->scb.sides[1]->rw.in_amps;
 	} else {
-		ASSERT3P(comp->upstream, ==, comp->cb.sides[1]);
+		ASSERT3P(comp->upstream, ==, comp->scb.sides[1]);
 		network_load_integrate_comp(src, comp,
-		    comp->cb.sides[0], depth + 1, src_mask, d_t);
-		comp->rw.out_amps = comp->cb.sides[0]->rw.in_amps;
+		    comp->scb.sides[0], depth + 1, src_mask, d_t);
+		comp->rw.out_amps = comp->scb.sides[0]->rw.in_amps;
 	}
 	ASSERT(!isnan(comp->rw.in_amps));
 	comp->rw.in_amps = comp->rw.out_amps;
@@ -2352,7 +2370,8 @@ network_load_integrate_comp(const elec_comp_t *src,
 		network_load_integrate_bus(src, comp, depth, src_mask, d_t);
 		break;
 	case ELEC_CB:
-		network_load_integrate_cb(src, comp, depth, src_mask, d_t);
+	case ELEC_SHUNT:
+		network_load_integrate_scb(src, comp, depth, src_mask, d_t);
 		break;
 	case ELEC_TIE:
 		network_load_integrate_tie(src, comp, depth, src_mask, d_t);
@@ -2486,7 +2505,7 @@ libelec_cb_set(elec_comp_t *comp, bool set)
 	 * This is atomic, no locking required. Also, the worker
 	 * copies its the breaker state to wk_set at the start.
 	 */
-	comp->cb.cur_set = set;
+	comp->scb.cur_set = set;
 }
 
 bool
@@ -2496,7 +2515,7 @@ libelec_cb_get(const elec_comp_t *comp)
 	ASSERT(comp->info != NULL);
 	ASSERT3U(comp->info->type, ==, ELEC_CB);
 	/* atomic read, no need to lock */
-	return (comp->cb.cur_set);
+	return (comp->scb.cur_set);
 }
 
 double
@@ -2506,7 +2525,7 @@ libelec_cb_get_temp(const elec_comp_t *comp)
 	ASSERT(comp->info != NULL);
 	ASSERT3U(comp->info->type, ==, ELEC_CB);
 	/* atomic read, no need to lock */
-	return (comp->cb.temp);
+	return (comp->scb.temp);
 }
 
 void
@@ -2647,6 +2666,59 @@ libelec_tie_get_num_buses(const elec_comp_t *comp)
 	ASSERT3U(comp->info->type, ==, ELEC_TIE);
 	/* This is immutable, so no need to lock */
 	return (comp->tie.n_buses);
+}
+
+bool
+libelec_tie_get_list(elec_comp_t *tie, bool exclusive, ...)
+{
+	va_list ap;
+	bool res;
+
+	ASSERT(tie != NULL);
+	ASSERT3U(tie->info->type, ==, ELEC_TIE);
+	va_start(ap, exclusive);
+	res = libelec_tie_get_list_v(tie, exclusive, ap);
+	va_end(ap);
+
+	return (res);
+}
+
+bool
+libelec_tie_get_list_v(elec_comp_t *tie, bool exclusive, va_list ap)
+{
+	bool res = true;
+	size_t list_len = 0, n_tied = 0;
+	const elec_comp_t *bus;
+
+	ASSERT(tie != NULL);
+	ASSERT3U(tie->info->type, ==, ELEC_TIE);
+
+	mutex_enter(&tie->tie.lock);
+	for (unsigned i = 0; i < tie->tie.n_buses; i++) {
+		if (tie->tie.cur_state[i])
+			n_tied++;
+	}
+	for (list_len = 0; (bus = va_arg(ap, const elec_comp_t *)) != NULL;
+	    list_len++) {
+		bool found = false;
+		for (unsigned i = 0; i < tie->tie.n_buses; i++) {
+			if (tie->tie.buses[i] == bus) {
+				found = true;
+				if (!tie->tie.cur_state[i]) {
+					res = false;
+					goto out;
+				}
+				break;
+			}
+		}
+		ASSERT(found);
+	}
+	if (list_len != n_tied && exclusive)
+		res = false;
+out:
+	mutex_exit(&tie->tie.lock);
+
+	return (res);
 }
 
 /*
