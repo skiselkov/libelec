@@ -12,6 +12,7 @@
  * obtained from Saso Kiselkov.
  */
 
+#include "libelec_drawing.h"
 #include "libelec_types_impl.h"
 
 #define	PX(pos)	(pos_scale * (pos))

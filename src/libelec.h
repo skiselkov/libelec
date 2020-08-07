@@ -18,7 +18,6 @@
 #include <stdarg.h>
 #include <stdbool.h>
 
-#include <acfutils/mt_cairo_render.h>
 #include <acfutils/conf.h>
 #include <acfutils/geom.h>
 #include <acfutils/sysmacros.h>
@@ -208,9 +207,6 @@ double libelec_batt_get_chg_rel(const elec_comp_t *comp);
 double libelec_phys_get_chg_rel(double J_ideal, double T_batt);
 double libelec_phys_get_batt_voltage(double U_nominal, double chg_rel,
     double I_rel);
-
-void libelec_draw_layout(const elec_sys_t *sys, cairo_t *cr, double pos_scale,
-    double font_sz);
 
 #ifdef __cplusplus
 }
