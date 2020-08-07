@@ -102,6 +102,11 @@ typedef struct {
 	elec_comp_info_t	*sides[2];
 } elec_diode_info_t;
 
+typedef enum {
+    GUI_LOAD_GENERIC,
+    GUI_LOAD_MOTOR
+} gui_load_type_t;
+
 struct elec_comp_info_s {
 	elec_comp_type_t		type;
 	char				*name;
@@ -116,6 +121,13 @@ struct elec_comp_info_s {
 		elec_cb_info_t		cb;
 		elec_diode_info_t	diode;
 	};
+	struct {
+		vect2_t			pos;
+		double			sz;
+		int			rot;
+		gui_load_type_t		load_type;
+		bool			virt;
+	} gui;
 };
 
 typedef struct {
@@ -196,6 +208,9 @@ double libelec_batt_get_chg_rel(const elec_comp_t *comp);
 double libelec_phys_get_chg_rel(double J_ideal, double T_batt);
 double libelec_phys_get_batt_voltage(double U_nominal, double chg_rel,
     double I_rel);
+
+void libelec_draw_layout(const elec_sys_t *sys, cairo_t *cr, double pos_scale,
+    double font_sz);
 
 #ifdef __cplusplus
 }
