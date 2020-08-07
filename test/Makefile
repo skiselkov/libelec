@@ -21,7 +21,7 @@ LDFLAGS = -fPIC -L$(ACFUTILS)/qmake/lin64 -lacfutils \
      $(shell $(ACFUTILS)/pkg-config-deps linux-64 --libs) \
      -lm -lpthread -lstdc++
 
-OBJS = test.o ../src/libelec.o
+OBJS = test.o ../src/libelec.o ../src/libelec_drawing.o
 
 ifeq ($(slow),yes)
     CFLAGS += -DLIBELEC_SLOW_DEBUG
