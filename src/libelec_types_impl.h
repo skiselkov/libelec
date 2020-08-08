@@ -15,11 +15,17 @@
 #ifndef	__LIBELEC_TYPES_IMPL_H__
 #define	__LIBELEC_TYPES_IMPL_H__
 
+#ifdef	XPLANE
+#include <acfutils/dr.h>
+#endif
 #include <acfutils/list.h>
 #include <acfutils/worker.h>
 #include <acfutils/thread.h>
 
 #include <abus_ser.h>
+#ifndef	LIBELEC_NO_LIBSWITCH
+#include <libswitch.h>
+#endif
 
 #include "libelec.h"
 

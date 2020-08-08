@@ -1601,7 +1601,13 @@ network_update_cb(elec_comp_t *cb, double d_t)
 	FILTER_IN(cb->scb.temp, amps_rat, d_t, cb->info->cb.rate);
 
 	if (cb->scb.temp >= 1.0) {
-		cb->scb.cur_set = cb->scb.wk_set = false;
+		cb->scb.wk_set = false;
+		cb->scb.cur_set = false;
+#ifndef	LIBELEC_NO_LIBSWITCH
+		/* Also pull the switch if one is present */
+		if (cb->scb.sw != NULL)
+			libswitch_set(cb->scb.sw, true);
+#endif	/* LIBELEC_NO_LIBSWITCH */
 		if (cb->info->cb.fuse)
 			cb->rw.failed = true;
 	}
@@ -2216,19 +2222,23 @@ network_load_integrate_comp(const elec_comp_t *src,
 
 	switch (comp->info->type) {
 	case ELEC_BATT:
-		network_load_integrate_comp(src, comp, comp->batt.bus,
-		    depth + 1, src_mask, d_t);
-		comp->rw.out_amps = comp->batt.bus->rw.in_amps;
-		comp->batt.prev_amps = comp->rw.out_amps;
+		if (comp->batt.bus->src == comp) {
+			network_load_integrate_comp(src, comp, comp->batt.bus,
+			    depth + 1, src_mask, d_t);
+			comp->rw.out_amps = comp->batt.bus->rw.in_amps;
+			comp->batt.prev_amps = comp->rw.out_amps;
+		}
 		break;
 	case ELEC_GEN:
-		network_load_integrate_comp(src, comp, comp->gen.bus,
-		    depth + 1, src_mask, d_t);
-		comp->rw.out_amps = comp->gen.bus->rw.in_amps;
-		comp->rw.in_volts = comp->rw.out_volts;
-		comp->rw.in_amps = comp->rw.out_amps /
-		    fx_lin_multi(comp->rw.in_volts * comp->rw.out_amps,
-		    comp->info->gen.eff_curve, true);
+		if (comp->gen.bus->src == comp) {
+			network_load_integrate_comp(src, comp, comp->gen.bus,
+			    depth + 1, src_mask, d_t);
+			comp->rw.out_amps = comp->gen.bus->rw.in_amps;
+			comp->rw.in_volts = comp->rw.out_volts;
+			comp->rw.in_amps = comp->rw.out_amps /
+			    fx_lin_multi(comp->rw.in_volts * comp->rw.out_amps,
+			    comp->info->gen.eff_curve, true);
+		}
 		break;
 	case ELEC_TRU:
 		network_load_integrate_tru(comp, depth, src_mask, d_t);

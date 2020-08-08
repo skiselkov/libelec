@@ -381,8 +381,8 @@ draw_node(cairo_t *cr, double pos_scale, vect2_t pos)
 static void
 draw_tie(cairo_t *cr, double pos_scale, const elec_comp_t *tie)
 {
+	vect2_t endpt[2] = { NULL_VECT2, NULL_VECT2 };
 	vect2_t pos;
-	unsigned num_tied = 0;
 
 	ASSERT(cr != NULL);
 	ASSERT(tie != NULL);
@@ -392,14 +392,27 @@ draw_tie(cairo_t *cr, double pos_scale, const elec_comp_t *tie)
 
 	cairo_set_line_width(cr, 4);
 	for (unsigned i = 0; i < tie->tie.n_buses; i++) {
-		if (tie->tie.cur_state[i]) {
-			vect2_t node_pos = tie_node_pos(tie, i);
-			cairo_move_to(cr, PX(node_pos.x), PX(node_pos.y));
-			cairo_line_to(cr, PX(pos.x), PX(pos.y));
-			num_tied++;
+		elec_comp_t *remote_bus = tie->tie.buses[i];
+		vect2_t conn = VECT2(1e9, 1e9);
+
+		if (!tie->tie.cur_state[i])
+			continue;
+
+		for (unsigned j = 0; j < tie->tie.n_buses; j++) {
+			conn = pick_closer(remote_bus->info->gui.pos, conn,
+			    tie_node_pos(tie, j));
+		}
+		if (IS_NULL_VECT(endpt[0])) {
+			endpt[0] = conn;
+		} else {
+			endpt[1] = conn;
+			break;
 		}
 	}
-	if (num_tied == 0) {
+	if (!IS_NULL_VECT(endpt[0]) && !IS_NULL_VECT(endpt[1])) {
+		cairo_move_to(cr, PX(endpt[0].x), PX(endpt[0].y));
+		cairo_line_to(cr, PX(endpt[1].x), PX(endpt[1].y));
+	} else {
 		/* Nothing tied, show the unconnected state */
 		if (tie->tie.n_buses == 2) {
 			cairo_move_to(cr, PX(pos.x - 1), PX(pos.y - 1));
