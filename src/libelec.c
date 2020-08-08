@@ -40,7 +40,7 @@
 #include "libelec.h"
 #include "libelec_types_impl.h"
 
-#define	EXEC_INTVAL		50000	/* us */
+#define	EXEC_INTVAL		40000	/* us */
 #define	MAX_NETWORK_DEPTH	100	/* dimensionless */
 
 typedef struct {
@@ -71,6 +71,9 @@ static void network_load_integrate_comp(const elec_comp_t *src,
     uint64_t src_mask, double d_t);
 static void network_load_integrate_load(elec_comp_t *comp, unsigned depth,
     double d_t);
+
+static double network_trace(const elec_comp_t *upstream,
+    const elec_comp_t *comp, unsigned depth, bool do_print);
 
 #ifdef	XPLANE
 /*
@@ -1479,8 +1482,10 @@ network_reset(elec_sys_t *sys)
 		comp->src = NULL;
 
 		comp->rw.in_volts = 0;
+		comp->rw.in_pwr = 0;
 		comp->rw.in_amps = 0;
 		comp->rw.out_volts = 0;
+		comp->rw.out_pwr = 0;
 		comp->rw.out_amps = 0;
 
 		mutex_enter(&comp->rw_ro_lock);
@@ -1690,14 +1695,13 @@ network_paint_src_bus(elec_comp_t *src, elec_comp_t *upstream,
 	ASSERT3U(comp->info->type, ==, ELEC_BUS);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
+	if (comp->rw.failed)
+		return;
+
 	if (comp->rw.in_volts < src->rw.out_volts) {
 		comp->src = src;
 		comp->upstream = upstream;
-
-		if (!comp->rw.failed)
-			comp->rw.in_volts = src->rw.out_volts;
-		else
-			comp->rw.in_volts = 0;
+		comp->rw.in_volts = src->rw.out_volts;
 
 		for (unsigned i = 0; i < comp->bus.n_comps; i++) {
 			if (upstream != comp->bus.comps[i]) {
@@ -1721,6 +1725,9 @@ network_paint_src_tie(elec_comp_t *src, elec_comp_t *upstream,
 	ASSERT3U(comp->info->type, ==, ELEC_TIE);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
+	if (comp->rw.failed)
+		return;
+
 	/* Check if the upstream bus is currently tied */
 	for (unsigned i = 0; i < comp->tie.n_buses; i++) {
 		if (upstream == comp->tie.buses[i]) {
@@ -1730,8 +1737,6 @@ network_paint_src_tie(elec_comp_t *src, elec_comp_t *upstream,
 					comp->upstream = upstream;
 					comp->rw.in_volts = src->rw.out_volts;
 				}
-				if (comp->rw.failed)
-					comp->rw.in_volts = 0;
 				tied = true;
 			}
 			found = true;
@@ -1774,6 +1779,9 @@ network_paint_src_tru(elec_comp_t *src, elec_comp_t *upstream,
 			comp->rw.out_volts = 0;
 		}
 		ASSERT(comp->tru.dc != NULL);
+		/*
+		 * The TRU becomes the source for downstream buses.
+		 */
 		network_paint_src_comp(comp, comp, comp->tru.dc, depth + 1);
 	}
 }
@@ -1926,6 +1934,9 @@ network_load_integrate_tru(elec_comp_t *comp, unsigned depth,
 	ASSERT3U(comp->info->type, ==, ELEC_TRU);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
+	if (comp->tru.dc->upstream != comp)
+		return;
+
 	/* When hopping over to the DC network, the TRU becomes the src */
 	network_load_integrate_comp(comp, comp, comp->tru.dc, depth + 1,
 	    src_mask, d_t);
@@ -1936,9 +1947,9 @@ network_load_integrate_tru(elec_comp_t *comp, unsigned depth,
 		return;
 	}
 	comp->rw.out_amps = comp->tru.dc->rw.in_amps;
-	eff = fx_lin_multi(comp->rw.out_amps, comp->info->tru.eff_curve,
-	    true);
-	ASSERT3F(eff, >, 0);
+	eff = fx_lin_multi(comp->rw.out_amps, comp->info->tru.eff_curve, true);
+	ASSERT3F(eff, >=, 0);
+	ASSERT3F(eff, <, 1);
 	comp->rw.in_amps = ((comp->rw.out_volts / comp->rw.in_volts) *
 	    comp->rw.out_amps) / eff;
 	ASSERT(comp->tru.ac != NULL);
@@ -1998,6 +2009,7 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 		 */
 		load_I = 0;
 	}
+
 	/*
 	 * When the input voltage is greater than the input capacitance
 	 * voltage, we will be charging up the input capacitance.
@@ -2135,6 +2147,7 @@ network_load_integrate_bus(const elec_comp_t *src, elec_comp_t *comp,
 	for (unsigned i = 0; i < comp->bus.n_comps; i++) {
 		ASSERT(comp->bus.comps[i] != NULL);
 		if (comp->bus.comps[i] != comp->upstream &&
+		    comp->bus.comps[i]->upstream == comp &&
 		    comp->bus.comps[i]->src == src) {
 			network_load_integrate_comp(src, comp,
 			    comp->bus.comps[i], depth + 1, src_mask, d_t);
@@ -2160,8 +2173,11 @@ network_load_integrate_tie(const elec_comp_t *src, elec_comp_t *comp,
 
 	for (unsigned i = 0; i < comp->tie.n_buses; i++) {
 		ASSERT(comp->tie.buses[i] != NULL);
+		if (comp->tie.buses[i] == comp->upstream)
+			ASSERT(comp->tie.wk_state[i]);
 		if (comp->tie.wk_state[i] &&
-		    comp->tie.buses[i] != comp->upstream) {
+		    comp->tie.buses[i] != comp->upstream &&
+		    comp->tie.buses[i]->upstream == comp) {
 			network_load_integrate_comp(src, comp,
 			    comp->tie.buses[i], depth + 1, src_mask, d_t);
 			ASSERT(!isnan(comp->tie.buses[i]->rw.in_amps));
@@ -2223,7 +2239,7 @@ network_load_integrate_comp(const elec_comp_t *src,
 	switch (comp->info->type) {
 	case ELEC_BATT:
 		if (comp->batt.bus->src == comp) {
-			network_load_integrate_comp(src, comp, comp->batt.bus,
+			network_load_integrate_comp(comp, comp, comp->batt.bus,
 			    depth + 1, src_mask, d_t);
 			comp->rw.out_amps = comp->batt.bus->rw.in_amps;
 			comp->batt.prev_amps = comp->rw.out_amps;
@@ -2231,7 +2247,7 @@ network_load_integrate_comp(const elec_comp_t *src,
 		break;
 	case ELEC_GEN:
 		if (comp->gen.bus->src == comp) {
-			network_load_integrate_comp(src, comp, comp->gen.bus,
+			network_load_integrate_comp(comp, comp, comp->gen.bus,
 			    depth + 1, src_mask, d_t);
 			comp->rw.out_amps = comp->gen.bus->rw.in_amps;
 			comp->rw.in_volts = comp->rw.out_volts;
@@ -2241,6 +2257,7 @@ network_load_integrate_comp(const elec_comp_t *src,
 		}
 		break;
 	case ELEC_TRU:
+		ASSERT3P(upstream, ==, comp->tru.ac);
 		network_load_integrate_tru(comp, depth, src_mask, d_t);
 		break;
 	case ELEC_LOAD:
@@ -2257,11 +2274,14 @@ network_load_integrate_comp(const elec_comp_t *src,
 		network_load_integrate_tie(src, comp, depth, src_mask, d_t);
 		break;
 	case ELEC_DIODE:
-		network_load_integrate_comp(src, comp,
-		    comp->diode.sides[1], depth + 1, src_mask, d_t);
-		comp->rw.out_amps = comp->diode.sides[1]->rw.in_amps;
-		comp->rw.in_amps = comp->rw.out_amps;
-		ASSERT(!isnan(comp->rw.in_amps));
+		ASSERT3P(upstream, ==, comp->diode.sides[0]);
+		if (comp->diode.sides[1]->upstream == comp) {
+			network_load_integrate_comp(src, comp,
+			    comp->diode.sides[1], depth + 1, src_mask, d_t);
+			comp->rw.out_amps = comp->diode.sides[1]->rw.in_amps;
+			comp->rw.in_amps = comp->rw.out_amps;
+			ASSERT(!isnan(comp->rw.in_amps));
+		}
 		break;
 	}
 }
@@ -2294,6 +2314,209 @@ network_state_xfer(elec_sys_t *sys)
 		mutex_enter(&comp->rw_ro_lock);
 		comp->ro = comp->rw;
 		mutex_exit(&comp->rw_ro_lock);
+	}
+}
+
+static void
+mk_spaces(char *spaces, unsigned len)
+{
+	memset(spaces, 0, len);
+	for (unsigned i = 0; i + 1 < len; i += 2) {
+		spaces[i] = ' ';
+		spaces[i + 1] = ' ';
+	}
+}
+
+static void
+print_trace_data(const elec_comp_t *comp, unsigned depth, bool out_data,
+    double load)
+{
+	char spaces[2 * depth + 1];
+	double W;
+
+	ASSERT(comp != NULL);
+
+	mk_spaces(spaces, 2 * depth + 1);
+	W = out_data ? (comp->rw.out_volts * comp->rw.out_amps) :
+	    (comp->rw.in_volts * comp->rw.in_amps);
+	logMsg("%s%-5s  %s  %3s: %.2fW  LOADS: %.2fW",
+	    spaces, comp_type2str(comp->info->type), comp->info->name,
+	    out_data ? "OUT" : "IN", W, load);
+}
+
+static double
+network_trace_scb(const elec_comp_t *upstream, const elec_comp_t *comp,
+    unsigned depth, bool do_print)
+{
+	ASSERT(upstream != NULL);
+	ASSERT(comp != NULL);
+	ASSERT(comp->info->type == ELEC_CB || comp->info->type == ELEC_SHUNT);
+
+	if (!comp->scb.wk_set)
+		return (0);
+	if (upstream == comp->scb.sides[0]) {
+		return (network_trace(comp, comp->scb.sides[1],
+		    depth + 1, do_print));
+	} else {
+		return (network_trace(comp, comp->scb.sides[0],
+		    depth + 1, do_print));
+	}
+}
+
+static double
+network_trace(const elec_comp_t *upstream, const elec_comp_t *comp,
+    unsigned depth, bool do_print)
+{
+	double load_trace = 0;
+
+	ASSERT(upstream != NULL);
+	ASSERT(comp != NULL);
+
+	if (upstream != comp && comp->upstream != upstream)
+		return (0);
+
+	switch (comp->info->type) {
+	case ELEC_BATT:
+		load_trace = network_trace(comp, comp->batt.bus, depth + 1,
+		    false);
+		if (do_print) {
+			print_trace_data(comp, depth, true, load_trace);
+			network_trace(comp, comp->batt.bus, depth + 1, true);
+		}
+		break;
+	case ELEC_GEN:
+		load_trace = network_trace(comp, comp->gen.bus, depth + 1,
+		    false);
+		if (do_print) {
+			print_trace_data(comp, depth, true, load_trace);
+			network_trace(comp, comp->gen.bus, depth + 1, true);
+		}
+		break;
+	case ELEC_TRU:
+		if (upstream != comp) {
+			if (do_print)
+				print_trace_data(comp, depth, false, 0);
+			return (comp->rw.in_volts * comp->rw.in_amps);
+		} else {
+			load_trace = network_trace(comp, comp->tru.dc,
+			    depth + 1, false);
+			if (do_print) {
+				print_trace_data(comp, depth, true, load_trace);
+				network_trace(comp, comp->tru.dc, depth + 1,
+				    true);
+			}
+		}
+		break;
+	case ELEC_LOAD:
+		if (do_print)
+			print_trace_data(comp, depth, false, 0);
+		return (comp->rw.in_volts * comp->rw.in_amps);
+	case ELEC_BUS:
+		for (unsigned i = 0; i < comp->bus.n_comps; i++) {
+			load_trace += network_trace(comp, comp->bus.comps[i],
+			    depth + 1, false);
+		}
+		if (do_print) {
+			print_trace_data(comp, depth, false, load_trace);
+			for (unsigned i = 0; i < comp->bus.n_comps; i++) {
+				network_trace(comp, comp->bus.comps[i],
+				    depth + 1, true);
+			}
+		}
+		break;
+	case ELEC_CB:
+	case ELEC_SHUNT:
+		load_trace = network_trace_scb(upstream, comp, depth, false);
+		if (do_print) {
+			print_trace_data(comp, depth, false, load_trace);
+			network_trace_scb(upstream, comp, depth, true);
+		}
+		break;
+	case ELEC_TIE:
+		for (unsigned i = 0; i < comp->tie.n_buses; i++) {
+			if (comp->tie.wk_state[i]) {
+				load_trace += network_trace(comp,
+				    comp->tie.buses[i], depth + 1, false);
+			}
+		}
+		if (do_print) {
+			print_trace_data(comp, depth, false, load_trace);
+			for (unsigned i = 0; i < comp->tie.n_buses; i++) {
+				if (comp->tie.wk_state[i]) {
+					load_trace += network_trace(comp,
+					    comp->tie.buses[i], depth + 1,
+					    true);
+				}
+			}
+		}
+		break;
+	case ELEC_DIODE:
+		load_trace = network_trace(comp, comp->diode.sides[1],
+		    depth + 1, false);
+		if (do_print) {
+			print_trace_data(comp, depth, false, load_trace);
+			network_trace(comp, comp->diode.sides[1],
+			    depth + 1, true);
+		}
+		break;
+	default:
+		VERIFY_FAIL();
+	}
+
+	return (load_trace);
+}
+
+static void
+network_integrity_check(elec_sys_t *sys)
+{
+	double E_out = 0, E_in = 0;
+
+	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
+	    comp = list_next(&sys->comps, comp)) {
+		if (comp->info->type == ELEC_LOAD) {
+			if (comp->src != NULL) {
+				ASSERT3F(comp->rw.in_volts, ==,
+				    comp->src->rw.out_volts);
+			} else {
+				ASSERT0(comp->rw.in_volts);
+			}
+			E_out += comp->rw.in_volts * comp->rw.in_amps;
+		} else if (comp->info->type == ELEC_TRU) {
+			E_out += comp->rw.in_volts * comp->rw.in_amps;
+			E_in += comp->rw.out_volts * comp->rw.out_amps;
+		} else if (comp->info->type == ELEC_GEN ||
+		    comp->info->type == ELEC_BATT) {
+			E_in += comp->rw.out_volts * comp->rw.out_amps;
+		}
+	}
+	if (ABS(E_out - E_in) >= 1e-3) {
+		for (elec_comp_t *src = list_head(&sys->comps); src != NULL;
+		    src = list_next(&sys->comps, src)) {
+			double W_in = 0, W_out = 0;
+			if (src->info->type != ELEC_TRU &&
+			    src->info->type != ELEC_BATT &&
+			    src->info->type != ELEC_GEN) {
+				continue;
+			}
+			for (elec_comp_t *load = list_head(&sys->comps);
+			    load != NULL; load = list_next(&sys->comps, load)) {
+				if ((load->info->type != ELEC_LOAD &&
+				    load->info->type != ELEC_TRU) ||
+				    load->src != src) {
+					continue;
+				}
+				W_out += load->rw.in_volts * load->rw.in_amps;
+			}
+			W_in = src->rw.out_volts * src->rw.out_amps;
+			if (ABS(W_out - W_in) > 1e-3) {
+				logMsg("Overflow src %s, input %.2fW, output "
+				    "%.2fW, trace:",
+				    src->info->name, W_in, W_out);
+				network_trace(src, src, 0, true);
+				abort();
+			}
+		}
+		VERIFY_FAIL();
 	}
 }
 
@@ -2331,6 +2554,7 @@ elec_sys_worker(void *userinfo)
 	network_load_integrate(sys, d_t);
 	network_loads_update(sys, d_t);
 	network_state_xfer(sys);
+	network_integrity_check(sys);
 
 	mutex_enter(&sys->user_cbs_lock);
 	for (user_cb_info_t *ucbi = avl_first(&sys->user_cbs); ucbi != NULL;
