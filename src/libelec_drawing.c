@@ -257,7 +257,7 @@ draw_bus(cairo_t *cr, double pos_scale, const elec_comp_info_t *info)
 }
 
 static void
-draw_cb(cairo_t *cr, double pos_scale, const elec_comp_t *cb)
+draw_cb(cairo_t *cr, double pos_scale, const elec_comp_t *cb, double font_sz)
 {
 	const elec_comp_info_t *info;
 	vect2_t pos;
@@ -293,6 +293,13 @@ draw_cb(cairo_t *cr, double pos_scale, const elec_comp_t *cb)
 	cairo_rel_move_to(cr, PX(-0.4), 0);
 	cairo_rel_line_to(cr, PX(0.8), 0);
 	cairo_stroke(cr);
+
+	if (info->cb.triphase) {
+		cairo_set_font_size(cr, round(0.75 * font_sz));
+		show_text_aligned(cr, PX(pos.x), PX(pos.y), TEXT_ALIGN_CENTER,
+		    "3P");
+		cairo_set_font_size(cr, font_sz);
+	}
 
 	if (strncmp(info->name, "CB_", 3) == 0) {
 		show_text_aligned(cr, PX(pos.x), PX(pos.y + 0.8),
@@ -575,7 +582,7 @@ libelec_draw_layout(const elec_sys_t *sys, cairo_t *cr, double pos_scale,
 			draw_gen(cr, pos_scale, info);
 			break;
 		case ELEC_CB:
-			draw_cb(cr, pos_scale, comp);
+			draw_cb(cr, pos_scale, comp, font_sz);
 			break;
 		case ELEC_SHUNT:
 			draw_shunt(cr, pos_scale, info);

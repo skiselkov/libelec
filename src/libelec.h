@@ -95,6 +95,7 @@ typedef struct {
 	double			max_amps;
 	double			rate;		/* heating rate */
 	bool			fuse;
+	bool			triphase;	/* 3-phase breaker? */
 } elec_cb_info_t;
 
 typedef struct {

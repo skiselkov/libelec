@@ -219,6 +219,9 @@ resolve_bus_links(elec_sys_t *sys, elec_comp_t *bus)
 			break;
 		case ELEC_CB:
 		case ELEC_SHUNT:
+			/* 3-phase breakers are only allowed on AC buses */
+			ASSERT(!comp->info->cb.triphase ||
+			    bus->info->bus.ac);
 			if (comp->scb.sides[0] == NULL) {
 				comp->scb.sides[0] = bus;
 			} else {
@@ -850,11 +853,13 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 		    strncmp(line, "LOAD ", 5) == 0 ||
 		    strncmp(line, "BUS ", 4) == 0 ||
 		    strncmp(line, "CB ", 3) == 0 ||
+		    strncmp(line, "CB3 ", 4) == 0 ||
 		    strncmp(line, "SHUNT ", 6) == 0 ||
 		    strncmp(line, "TIE ", 4) == 0 ||
 		    strncmp(line, "DIODE ", 6) == 0) {
 			num_comps++;
-		} else if (strncmp(line, "LOADCB ", 7) == 0) {
+		} else if (strncmp(line, "LOADCB ", 7) == 0 ||
+		    strncmp(line, "LOADCB3 ", 8) == 0) {
 			num_comps += 2;
 		}
 	}
@@ -938,7 +943,8 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 			info->bus.ac = (strcmp(comps[2], "AC") == 0);
 			memset(bus_IDs_seen, 0, sizeof (bus_IDs_seen));
 			bus_ID_cur = 0;
-		} else if (strcmp(cmd, "CB") == 0 && n_comps == 3) {
+		} else if ((strcmp(cmd, "CB") == 0 ||
+		    strcmp(cmd, "CB3") == 0) && n_comps == 3) {
 			ASSERT3U(comp_i, <, num_comps);
 			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
@@ -946,6 +952,7 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 			info->name = strdup(comps[1]);
 			info->cb.rate = 1;
 			info->cb.max_amps = atof(comps[2]);
+			info->cb.triphase = (strcmp(cmd, "CB3") == 0);
 		} else if (strcmp(cmd, "SHUNT") == 0 && n_comps == 2) {
 			ASSERT3U(comp_i, <, num_comps);
 			CHECK_DUP_NAME(comps[1]);
@@ -1112,7 +1119,8 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 				free_strlist(comps, n_comps);
 				goto errout;
 			}
-		} else if (strcmp(cmd, "LOADCB") == 0 && n_comps == 2 &&
+		} else if ((strcmp(cmd, "LOADCB") == 0 ||
+		    strcmp(cmd, "LOADCB3") == 0) && n_comps == 2 &&
 		    info != NULL && info->type == ELEC_LOAD) {
 			elec_comp_info_t *cb, *bus;
 
@@ -1122,6 +1130,7 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 			cb->name = sprintf_alloc("CB_%s", info->name);
 			cb->cb.rate = 1;
 			cb->cb.max_amps = atof(comps[1]);
+			cb->cb.triphase = (strcmp(cmd, "LOADCB3") == 0);
 			cb->autogen = true;
 
 			bus = &infos[comp_i++];
@@ -1132,6 +1141,9 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 
 			VERIFY(add_info_link(bus, info, NULL));
 			VERIFY(add_info_link(bus, cb, NULL));
+			ASSERT_MSG(!cb->cb.triphase || info->load.ac,
+			    "Can't connect 3-phase CB %s to a DC bus",
+			    info->name);
 		} else if (strcmp(cmd, "STD_LOAD") == 0 && n_comps == 2 &&
 		    info != NULL && info->type == ELEC_LOAD) {
 			info->load.std_load = atof(comps[1]);
@@ -1603,6 +1615,9 @@ network_update_cb(elec_comp_t *cb, double d_t)
 	ASSERT3F(cb->info->cb.max_amps, >, 0);
 
 	amps_rat = cb->rw.out_amps / cb->info->cb.max_amps;
+	/* 3-phase CBs evenly split the power between themselves */
+	if (cb->info->cb.triphase)
+		amps_rat /= 3;
 	FILTER_IN(cb->scb.temp, amps_rat, d_t, cb->info->cb.rate);
 
 	if (cb->scb.temp >= 1.0) {
