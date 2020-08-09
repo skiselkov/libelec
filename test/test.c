@@ -310,8 +310,9 @@ print_batts_i(elec_comp_t *comp, void *userinfo)
 	if (info->type != ELEC_BATT)
 		return;
 
-	printf("%-18s  %5.1fV  %6.1fA  %.2f%%\n",
+	printf("%-18s  %5.1fV  %6.1fA  %6.1fA  %.2f%%\n",
 	    info->name, libelec_comp_get_out_volts(comp),
+	    libelec_comp_get_in_amps(comp),
 	    libelec_comp_get_out_amps(comp),
 	    libelec_batt_get_chg_rel(comp) * 100);
 }
@@ -319,8 +320,8 @@ print_batts_i(elec_comp_t *comp, void *userinfo)
 static void
 print_batts(void)
 {
-	printf("NAME                 U_out    I_out     CHG%% \n"
-	    "------------------  ------  -------  -------\n");
+	printf("NAME                 U_out     I_in    I_out     CHG%% \n"
+	    "------------------  ------  -------  -------  -------\n");
 	libelec_walk_comps(sys, print_batts_i, NULL);
 }
 
@@ -339,6 +340,23 @@ cb(void)
 		return;
 	}
 	libelec_cb_set(comp, set);
+}
+
+static void
+batt(void)
+{
+	char batt_name[64];
+	elec_comp_t *comp;
+	float chg_rel;
+
+	if (scanf("%63s %f", batt_name, &chg_rel) != 2)
+		return;
+	comp = name2comp(batt_name);
+	if (comp == NULL) {
+		fprintf(stderr, "Unknown batt %s\n", batt_name);
+		return;
+	}
+	libelec_batt_set_chg_rel(comp, clamp(chg_rel, 0, 1));
 }
 
 static void
@@ -469,6 +487,8 @@ main(int argc, char **argv)
 			dump_img();
 		} else if (strcmp(cmd, "b") == 0) {
 			print_batts();
+		} else if (strcmp(cmd, "batt") == 0) {
+			batt();
 		} else if (strcmp(cmd, "help") == 0) {
 			print_help();
 #ifdef	LIBELEC_SLOW_DEBUG

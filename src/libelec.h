@@ -46,6 +46,7 @@ typedef struct {
 	double	volts;		/* nominal voltage */
 	double	capacity;	/* capacity in Joules at 15C */
 	double	max_pwr;	/* max power draw in Watts */
+	double	chg_R;		/* charging resistance, Ohms */
 	/* returns the battery temperature in kelvin */
 	double	(*get_temp)(elec_comp_t *comp);
 	void	*userinfo;
@@ -70,6 +71,13 @@ typedef struct {
 	vect2_t		*eff_curve;	/* output Watts -> efficiency curve */
 	elec_comp_info_t *ac;		/* AC bus side */
 	elec_comp_info_t *dc;		/* DC bus side */
+	/*
+	 * When operating in battery-charger mode, `charger' must be true
+	 * and the battery link non-NULL.
+	 */
+	bool		charger;
+	elec_comp_info_t *batt;
+	double		curr_lim;	/* current limit - Amps */
 } elec_tru_info_t;
 
 typedef struct {
@@ -127,6 +135,7 @@ struct elec_comp_info_s {
 		int			rot;
 		gui_load_type_t		load_type;
 		bool			virt;
+		vect3_t			color;
 	} gui;
 };
 
@@ -203,7 +212,8 @@ size_t libelec_tie_get_num_buses(const elec_comp_t *comp);
 bool libelec_tie_get_list(elec_comp_t *tie, bool exclusive, ...) SENTINEL_ATTR;
 bool libelec_tie_get_list_v(elec_comp_t *tie, bool exclusive, va_list ap);
 
-double libelec_batt_get_chg_rel(const elec_comp_t *comp);
+double libelec_batt_get_chg_rel(const elec_comp_t *batt);
+void libelec_batt_set_chg_rel(elec_comp_t *batt, double chg_rel);
 
 double libelec_phys_get_chg_rel(double J_ideal, double T_batt);
 double libelec_phys_get_batt_voltage(double U_nominal, double chg_rel,

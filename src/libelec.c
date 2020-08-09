@@ -165,6 +165,23 @@ info2comp_compar(const void *a, const void *b)
 	return (0);
 }
 
+static elec_comp_t *
+find_comp(elec_sys_t *sys, elec_comp_info_t *info, const elec_comp_t *src)
+{
+	elec_comp_t *comp;
+	elec_comp_t srch = { .info = info };
+
+	ASSERT(sys != NULL);
+	ASSERT(info != NULL);
+	ASSERT(src != NULL);
+
+	comp = avl_find(&sys->info2comp, &srch, NULL);
+	ASSERT_MSG(comp != NULL, "Component for info %s not found "
+	    "(referenced from %s)", srch.info->name, src->info->name);
+
+	return (comp);
+}
+
 static void
 resolve_bus_links(elec_sys_t *sys, elec_comp_t *bus)
 {
@@ -179,12 +196,9 @@ resolve_bus_links(elec_sys_t *sys, elec_comp_t *bus)
 	    sizeof (*bus->bus.comps));
 
 	for (int i = 0; bus->info->bus.comps[i] != NULL; i++) {
-		elec_comp_t *comp;
-		elec_comp_t srch = { .info = bus->info->bus.comps[i] };
+		elec_comp_t *comp = find_comp(sys, bus->info->bus.comps[i],
+		    bus);
 
-		comp = avl_find(&sys->info2comp, &srch, NULL);
-		ASSERT_MSG(comp != NULL, "Component for info %s not found "
-		    "(referenced from %s)", srch.info->name, bus->info->name);
 		bus->bus.comps[i] = comp;
 		ASSERT(comp->info != NULL);
 		switch (comp->info->type) {
@@ -280,8 +294,13 @@ resolve_comp_links(elec_sys_t *sys)
 
 	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
 	    comp = list_next(&sys->comps, comp)) {
-		if (comp->info->type == ELEC_BUS)
+		if (comp->info->type == ELEC_BUS) {
 			resolve_bus_links(sys, comp);
+		} else if (comp->info->type == ELEC_TRU &&
+		    comp->info->tru.charger) {
+			comp->tru.batt = find_comp(sys,
+			    comp->info->tru.batt, comp);
+		}
 	}
 }
 
@@ -375,6 +394,7 @@ libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 			ASSERT3F(comp->info->batt.volts, >, 0);
 			ASSERT3F(comp->info->batt.max_pwr, >, 0);
 			ASSERT3F(comp->info->batt.capacity, >=, 0);
+			ASSERT3F(comp->info->batt.chg_R, >, 0);
 			comp->batt.chg_rel = 1.0;
 			break;
 		case ELEC_GEN:
@@ -950,7 +970,7 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 			info = &infos[comp_i++];
 			info->type = ELEC_CB;
 			info->name = strdup(comps[1]);
-			info->cb.rate = 1;
+			info->cb.rate = 4;
 			info->cb.max_amps = atof(comps[2]);
 			info->cb.triphase = (strcmp(cmd, "CB3") == 0);
 		} else if (strcmp(cmd, "SHUNT") == 0 && n_comps == 2) {
@@ -1166,6 +1186,37 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 		} else if (strcmp(cmd, "GUI_VIRT") == 0 && n_comps == 1 &&
 		    info != NULL) {
 			info->gui.virt = true;
+		} else if (strcmp(cmd, "GUI_COLOR") == 0 && n_comps == 4 &&
+		    info != NULL) {
+			info->gui.color = VECT3(atof(comps[1]),
+			    atof(comps[2]), atof(comps[3]));
+		} else if (strcmp(cmd, "CHGR_BATT") == 0 && n_comps == 3 &&
+		    info != NULL && info->type == ELEC_TRU) {
+			info->tru.charger = true;
+			info->tru.batt =
+			    find_comp_info(infos, num_comps, comps[1]);
+			if (info->tru.batt == NULL) {
+				logMsg("%s:%d: unknown component %s",
+				    filename, linenum, comps[1]);
+				free_strlist(comps, n_comps);
+				goto errout;
+			}
+			info->tru.curr_lim = atof(comps[2]);
+			if (info->tru.curr_lim <= 0) {
+				logMsg("%s:%d: current limit must be positive",
+				    filename, linenum);
+				free_strlist(comps, n_comps);
+				goto errout;
+			}
+		} else if (strcmp(cmd, "CHG_R") == 0 && n_comps == 2 &&
+		    info != NULL && info->type == ELEC_BATT) {
+			info->batt.chg_R = atof(comps[1]);
+			if (info->batt.chg_R <= 0) {
+				logMsg("%s:%d: current resistance must be "
+				    "positive", filename, linenum);
+				free_strlist(comps, n_comps);
+				goto errout;
+			}
 		} else {
 			logMsg("%s:%d: unknown or malformed line",
 			    filename, linenum);
@@ -1592,6 +1643,9 @@ network_update_batt(elec_comp_t *batt, double d_t)
 	J_max = batt->info->batt.capacity * temp_coeff;
 	J = batt->batt.chg_rel * J_max;
 	J -= U * batt->batt.prev_amps * d_t;
+	/* Incorporate charging change */
+	J += batt->batt.rechg_W * d_t;
+	batt->batt.rechg_W = 0;
 
 	/* Recalculate the new voltage and relative charge state */
 	if (!batt->rw.failed) {
@@ -1602,6 +1656,8 @@ network_update_batt(elec_comp_t *batt, double d_t)
 		batt->rw.out_volts = 0;
 	}
 	batt->batt.chg_rel = J / J_max;
+	ASSERT3F(batt->batt.chg_rel, >=, 0);
+	ASSERT3F(batt->batt.chg_rel, <=, 1);
 }
 
 static void
@@ -1634,6 +1690,35 @@ network_update_cb(elec_comp_t *cb, double d_t)
 }
 
 static void
+network_update_tru(elec_comp_t *tru, double d_t)
+{
+	ASSERT(tru != NULL);
+	ASSERT(tru->info != NULL);
+	ASSERT3U(tru->info->type, ==, ELEC_TRU);
+	ASSERT3F(d_t, >, 0);
+	if (!tru->info->tru.charger) {
+		/*
+		 * In simple TRU operating mode, we operate as a fixed-rate
+		 * transformer. Our input voltage is directly proportional
+		 * to our output and we provide no output voltage regulation.
+		 */
+		tru->tru.chgr_regul = 1;
+	} else {
+		/*
+		 * In charger mode, we control an additional voltage
+		 * regulator parameter that lets us adjust our output
+		 * voltage as necessary to stabilize the charging current.
+		 */
+		ASSERT3F(tru->info->tru.curr_lim, >, 0);
+		double oc_ratio = tru->tru.prev_amps / tru->info->tru.curr_lim;
+		double regul_tgt = clamp(oc_ratio > 0 ?
+		    tru->tru.chgr_regul / oc_ratio : 1, 0, 1);
+		FILTER_IN(tru->tru.chgr_regul, regul_tgt,
+		    USEC2SEC(EXEC_INTVAL), 0.2);
+	}
+}
+
+static void
 network_srcs_update(elec_sys_t *sys, double d_t)
 {
 	ASSERT(sys != NULL);
@@ -1646,6 +1731,8 @@ network_srcs_update(elec_sys_t *sys, double d_t)
 			network_update_gen(comp, d_t);
 		else if (comp->info->type == ELEC_BATT)
 			network_update_batt(comp, d_t);
+		else if (comp->info->type == ELEC_TRU)
+			network_update_tru(comp, d_t);
 	}
 }
 
@@ -1787,7 +1874,8 @@ network_paint_src_tru(elec_comp_t *src, elec_comp_t *upstream,
 		comp->upstream = upstream;
 		if (!comp->rw.failed) {
 			comp->rw.in_volts = src->rw.out_volts;
-			comp->rw.out_volts = comp->info->tru.out_volts *
+			comp->rw.out_volts = comp->tru.chgr_regul *
+			    comp->info->tru.out_volts *
 			    (comp->rw.in_volts / comp->info->tru.in_volts);
 		} else {
 			comp->rw.in_volts = 0;
@@ -1868,6 +1956,11 @@ network_paint_src_comp(elec_comp_t *src, elec_comp_t *upstream,
 
 	switch (comp->info->type) {
 	case ELEC_BATT:
+		if (src != comp && comp->rw.out_volts < src->rw.out_volts) {
+			comp->src = src;
+			comp->upstream = upstream;
+		}
+		break;
 	case ELEC_GEN:
 		break;
 	case ELEC_BUS:
@@ -1962,6 +2055,11 @@ network_load_integrate_tru(elec_comp_t *comp, unsigned depth,
 		return;
 	}
 	comp->rw.out_amps = comp->tru.dc->rw.in_amps;
+	/*
+	 * Stash the amps value so we can use it to update voltage regulation
+	 * on battery chargers.
+	 */
+	comp->tru.prev_amps = comp->rw.out_amps;
 	eff = fx_lin_multi(comp->rw.out_amps, comp->info->tru.eff_curve, true);
 	ASSERT3F(eff, >=, 0);
 	ASSERT3F(eff, <, 1);
@@ -2231,6 +2329,61 @@ network_load_integrate_scb(const elec_comp_t *src, elec_comp_t *comp,
 }
 
 static void
+network_load_integrate_batt(const elec_comp_t *src, elec_comp_t *batt,
+    unsigned depth, uint64_t src_mask, double d_t)
+{
+	ASSERT(src != NULL);
+	ASSERT(batt != NULL);
+	ASSERT(batt->info != NULL);
+	ASSERT3U(batt->info->type, ==, ELEC_BATT);
+
+	if (src != batt && batt->src == src) {
+		double U_delta = MAX(src->rw.out_volts - batt->rw.out_volts, 0);
+		if (batt->batt.chg_rel < 1) {
+			double R = batt->info->batt.chg_R /
+			    (1 - batt->batt.chg_rel);
+			batt->rw.in_volts = src->rw.out_volts;
+			batt->rw.in_amps = U_delta / R;
+			/*
+			 * Store the charging rate so network_update_batt can
+			 * incorporate it into its battery energy state
+			 * calculation.
+			 */
+			batt->batt.rechg_W = batt->rw.in_volts *
+			    batt->rw.in_amps;
+		}
+		batt->rw.out_amps = 0;
+	} else if (src == batt) {
+		if (batt->batt.bus->src == batt) {
+			network_load_integrate_comp(batt, batt, batt->batt.bus,
+			    depth + 1, src_mask, d_t);
+			batt->rw.out_amps = batt->batt.bus->rw.in_amps;
+		}
+	}
+	batt->batt.prev_amps = batt->rw.out_amps;
+}
+
+static void
+network_load_integrate_gen(elec_comp_t *gen, unsigned depth,
+    uint64_t src_mask, double d_t)
+{
+	ASSERT(gen != NULL);
+	ASSERT(gen->info != NULL);
+	ASSERT3U(gen->info->type, ==, ELEC_GEN);
+
+	if (gen->gen.bus->src != gen)
+		return;
+
+	network_load_integrate_comp(gen, gen, gen->gen.bus, depth + 1,
+	    src_mask, d_t);
+	gen->rw.out_amps = gen->gen.bus->rw.in_amps;
+	gen->rw.in_volts = gen->rw.out_volts;
+	gen->rw.in_amps = gen->rw.out_amps /
+	    fx_lin_multi(gen->rw.in_volts * gen->rw.out_amps,
+	    gen->info->gen.eff_curve, true);
+}
+
+static void
 network_load_integrate_comp(const elec_comp_t *src,
     const elec_comp_t *upstream, elec_comp_t *comp, unsigned depth,
     uint64_t src_mask, double d_t)
@@ -2253,23 +2406,10 @@ network_load_integrate_comp(const elec_comp_t *src,
 
 	switch (comp->info->type) {
 	case ELEC_BATT:
-		if (comp->batt.bus->src == comp) {
-			network_load_integrate_comp(comp, comp, comp->batt.bus,
-			    depth + 1, src_mask, d_t);
-			comp->rw.out_amps = comp->batt.bus->rw.in_amps;
-			comp->batt.prev_amps = comp->rw.out_amps;
-		}
+		network_load_integrate_batt(src, comp, depth, src_mask, d_t);
 		break;
 	case ELEC_GEN:
-		if (comp->gen.bus->src == comp) {
-			network_load_integrate_comp(comp, comp, comp->gen.bus,
-			    depth + 1, src_mask, d_t);
-			comp->rw.out_amps = comp->gen.bus->rw.in_amps;
-			comp->rw.in_volts = comp->rw.out_volts;
-			comp->rw.in_amps = comp->rw.out_amps /
-			    fx_lin_multi(comp->rw.in_volts * comp->rw.out_amps,
-			    comp->info->gen.eff_curve, true);
-		}
+		network_load_integrate_gen(comp, depth, src_mask, d_t);
 		break;
 	case ELEC_TRU:
 		ASSERT3P(upstream, ==, comp->tru.ac);
@@ -2337,8 +2477,11 @@ mk_spaces(char *spaces, unsigned len)
 {
 	memset(spaces, 0, len);
 	for (unsigned i = 0; i + 1 < len; i += 2) {
-		spaces[i] = ' ';
-		spaces[i + 1] = ' ';
+		spaces[i] = '|';
+		if (i + 3 < len)
+			spaces[i + 1] = ' ';
+		else
+			spaces[i + 1] = '-';
 	}
 }
 
@@ -2394,8 +2537,14 @@ network_trace(const elec_comp_t *upstream, const elec_comp_t *comp,
 	case ELEC_BATT:
 		load_trace = network_trace(comp, comp->batt.bus, depth + 1,
 		    false);
+		load_trace += comp->rw.out_volts * comp->rw.in_amps;
 		if (do_print) {
-			print_trace_data(comp, depth, true, load_trace);
+			if (upstream == comp) {
+				print_trace_data(comp, depth, true, load_trace);
+			} else {
+				print_trace_data(comp, depth, false,
+				    load_trace);
+			}
 			network_trace(comp, comp->batt.bus, depth + 1, true);
 		}
 		break;
@@ -2499,9 +2648,11 @@ network_integrity_check(elec_sys_t *sys)
 		} else if (comp->info->type == ELEC_TRU) {
 			E_out += comp->rw.in_volts * comp->rw.in_amps;
 			E_in += comp->rw.out_volts * comp->rw.out_amps;
-		} else if (comp->info->type == ELEC_GEN ||
-		    comp->info->type == ELEC_BATT) {
+		} else if (comp->info->type == ELEC_GEN) {
 			E_in += comp->rw.out_volts * comp->rw.out_amps;
+		} else if (comp->info->type == ELEC_BATT) {
+			E_in += comp->rw.out_volts * comp->rw.out_amps;
+			E_out += comp->rw.in_volts * comp->rw.in_amps;
 		}
 	}
 	if (ABS(E_out - E_in) >= 1e-3) {
@@ -2515,9 +2666,10 @@ network_integrity_check(elec_sys_t *sys)
 			}
 			for (elec_comp_t *load = list_head(&sys->comps);
 			    load != NULL; load = list_next(&sys->comps, load)) {
-				if ((load->info->type != ELEC_LOAD &&
-				    load->info->type != ELEC_TRU) ||
-				    load->src != src) {
+				if (load->src != src ||
+				    (load->info->type != ELEC_LOAD &&
+				    load->info->type != ELEC_TRU &&
+				    load->info->type != ELEC_BATT)) {
 					continue;
 				}
 				W_out += load->rw.in_volts * load->rw.in_amps;
@@ -2528,7 +2680,7 @@ network_integrity_check(elec_sys_t *sys)
 				    "%.2fW, trace:",
 				    src->info->name, W_in, W_out);
 				network_trace(src, src, 0, true);
-				abort();
+				VERIFY_FAIL();
 			}
 		}
 		VERIFY_FAIL();
@@ -2863,12 +3015,28 @@ libelec_comp_get_upstream(const elec_comp_t *comp)
 }
 
 double
-libelec_batt_get_chg_rel(const elec_comp_t *comp)
+libelec_batt_get_chg_rel(const elec_comp_t *batt)
 {
-	ASSERT(comp != NULL);
-	ASSERT(comp->info != NULL);
-	ASSERT3U(comp->info->type, ==, ELEC_BATT);
-	return (comp->batt.chg_rel);
+	ASSERT(batt != NULL);
+	ASSERT(batt->info != NULL);
+	ASSERT3U(batt->info->type, ==, ELEC_BATT);
+	return (batt->batt.chg_rel);
+}
+
+void
+libelec_batt_set_chg_rel(elec_comp_t *batt, double chg_rel)
+{
+	ASSERT(batt != NULL);
+	ASSERT(batt->info != NULL);
+	ASSERT3U(batt->info->type, ==, ELEC_BATT);
+	ASSERT3F(chg_rel, >=, 0);
+	ASSERT3F(chg_rel, <=, 1);
+
+	mutex_enter(&batt->sys->worker_interlock);
+	batt->batt.chg_rel = chg_rel;
+	/* To prevent over-charging if the previous cycle was charging */
+	batt->batt.rechg_W = 0;
+	mutex_exit(&batt->sys->worker_interlock);
 }
 
 double
@@ -2890,6 +3058,7 @@ libelec_phys_get_batt_voltage(double U_nominal, double chg_rel, double I_rel)
 	ASSERT3F(U_nominal, >, 0);
 	ASSERT3F(chg_rel, >=, 0);
 	ASSERT3F(chg_rel, <=, 1);
+	I_rel = clamp(I_rel, 0, 1);
 	return (U_nominal * (1 - clamp(pow(I_rel, 1.45), 0, 1)) *
 	    fx_lin_multi(chg_rel, chg_volt_curve, true));
 }

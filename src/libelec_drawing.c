@@ -177,7 +177,7 @@ draw_bus_conns(cairo_t *cr, double pos_scale, const elec_comp_t *bus)
 		if (bus->info->gui.sz != 0 && !bus->info->gui.virt) {
 			cairo_arc(cr, PX(bus_pos.x), PX(bus_pos.y), PX(0.5),
 			    0, DEG2RAD(360));
-		} else {
+		} else if (bus->bus.n_comps > 2) {
 			cairo_arc(cr, PX(bus_pos.x), PX(bus_pos.y), PX(0.2),
 			    0, DEG2RAD(360));
 		}
@@ -203,15 +203,20 @@ static void
 draw_gen(cairo_t *cr, double pos_scale, const elec_comp_info_t *info)
 {
 	vect2_t pos;
+	vect3_t color;
 
 	ASSERT(cr != NULL);
 	ASSERT(info != NULL);
 	pos = info->gui.pos;
+	color = info->gui.color;
 
 	cairo_new_path(cr);
-	cairo_set_source_rgb(cr, 1, 1, 1);
+
+	cairo_set_source_rgb(cr, color.x, color.y, color.z);
 	cairo_arc(cr, PX(pos.x), PX(pos.y), PX(1.2), 0, DEG2RAD(360));
 	cairo_fill(cr);
+
+	cairo_set_line_width(cr, 2);
 	cairo_set_source_rgb(cr, 0, 0, 0);
 	cairo_arc(cr, PX(pos.x), PX(pos.y), PX(1.2), 0, DEG2RAD(360));
 	if (info->gen.ac) {
@@ -233,22 +238,37 @@ draw_gen(cairo_t *cr, double pos_scale, const elec_comp_info_t *info)
 }
 
 static void
-draw_bus(cairo_t *cr, double pos_scale, const elec_comp_info_t *info)
+draw_bus(cairo_t *cr, double pos_scale, const elec_comp_t *bus)
 {
+	const elec_comp_info_t *info;
 	vect2_t pos;
 
 	ASSERT(cr != NULL);
-	ASSERT(info != NULL);
+	ASSERT(bus != NULL);
+	info = bus->info;
 	pos = info->gui.pos;
 
 	cairo_new_path(cr);
 
-	if (!info->gui.virt)
-		cairo_set_line_width(cr, 10);
-	cairo_move_to(cr, PX(pos.x), PX(pos.y - info->gui.sz));
-	cairo_rel_line_to(cr, 0, PX(2 * info->gui.sz));
-	cairo_stroke(cr);
-	cairo_set_line_width(cr, 2);
+	if (info->gui.sz != 0) {
+		cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+		if (!info->gui.virt)
+			cairo_set_line_width(cr, 10);
+		cairo_move_to(cr, PX(pos.x), PX(pos.y - info->gui.sz));
+		cairo_rel_line_to(cr, 0, PX(2 * info->gui.sz));
+		cairo_stroke(cr);
+		if (!info->gui.virt && bus->src != NULL) {
+			vect3_t color = bus->src->info->gui.color;
+			cairo_set_source_rgb(cr, color.x, color.y, color.z);
+			cairo_set_line_width(cr, 4);
+			cairo_move_to(cr, PX(pos.x), PX(pos.y - info->gui.sz));
+			cairo_rel_line_to(cr, 0, PX(2 * info->gui.sz));
+			cairo_stroke(cr);
+			cairo_set_source_rgb(cr, 0, 0, 0);
+		}
+		cairo_set_line_width(cr, 2);
+		cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
+	}
 
 	if (info->gui.sz != 0 && !info->gui.virt) {
 		show_text_aligned(cr, PX(pos.x), PX(pos.y - info->gui.sz - 1),
@@ -338,14 +358,16 @@ static void
 draw_tru(cairo_t *cr, double pos_scale, const elec_comp_info_t *info)
 {
 	vect2_t pos;
+	vect3_t color;
 
 	ASSERT(cr != NULL);
 	ASSERT(info != NULL);
 	pos = info->gui.pos;
+	color = info->gui.color;
 
 	cairo_new_path(cr);
 
-	cairo_set_source_rgb(cr, 1, 1, 1);
+	cairo_set_source_rgb(cr, color.x, color.y, color.z);
 	cairo_rectangle(cr, PX(pos.x - 1.5), PX(pos.y - 1.5), PX(3), PX(3));
 	cairo_fill(cr);
 
@@ -514,12 +536,24 @@ static void
 draw_batt(cairo_t *cr, double pos_scale, const elec_comp_info_t *info)
 {
 	vect2_t pos;
+	vect3_t color;
 
 	ASSERT(cr != NULL);
 	ASSERT(info != NULL);
 	pos = info->gui.pos;
+	color = info->gui.color;
 
 	cairo_new_path(cr);
+
+	cairo_set_source_rgb(cr, color.x, color.y, color.z);
+	cairo_arc(cr, PX(pos.x), PX(pos.y), PX(1.2), 0, DEG2RAD(360));
+	cairo_fill(cr);
+
+	cairo_set_source_rgb(cr, 0, 0, 0);
+	cairo_arc(cr, PX(pos.x), PX(pos.y), PX(1.2), 0, DEG2RAD(360));
+	cairo_move_to(cr, PX(pos.x), PX(pos.y - 0.2));
+	cairo_rel_line_to(cr, 0, PX(-1.2));
+	cairo_stroke(cr);
 
 	cairo_move_to(cr, PX(pos.x + 0.4), PX(pos.y - 0.6));
 	cairo_rel_line_to(cr, PX(0.4), 0);
@@ -541,7 +575,7 @@ draw_batt(cairo_t *cr, double pos_scale, const elec_comp_info_t *info)
 	cairo_rel_line_to(cr, PX(0.8), PX(0));
 	cairo_stroke(cr);
 
-	show_text_aligned(cr, PX(pos.x - 1.2), PX(pos.y),
+	show_text_aligned(cr, PX(pos.x - 1.4), PX(pos.y),
 	    TEXT_ALIGN_RIGHT, "%s", info->name);
 }
 
@@ -576,7 +610,7 @@ libelec_draw_layout(const elec_sys_t *sys, cairo_t *cr, double pos_scale,
 
 		switch (info->type) {
 		case ELEC_BUS:
-			draw_bus(cr, pos_scale, info);
+			draw_bus(cr, pos_scale, comp);
 			break;
 		case ELEC_GEN:
 			draw_gen(cr, pos_scale, info);

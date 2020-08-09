@@ -12,8 +12,8 @@
 
 ACFUTILS=/home/diablos/NextDev/libacfutils
 
-CFLAGS = -D_GNU_SOURCE -DDEBUG -g -O0 -DIBM=0 -DAPL=0 -DLIN=1 -fPIC \
-    -DLIBELEC_NO_LIBSWITCH \
+CFLAGS = -D_GNU_SOURCE -DDEBUG -g -O2 -DIBM=0 -DAPL=0 -DLIN=1 \
+    -DLIBELEC_NO_LIBSWITCH -fPIC \
     -W -Wall -Werror -Wno-missing-field-initializers \
     -I../../abus/src -I../src -I$(ACFUTILS)/src \
     $(shell $(ACFUTILS)/pkg-config-deps linux-64 --cflags)

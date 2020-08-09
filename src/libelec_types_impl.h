@@ -66,6 +66,7 @@ typedef struct {
 	SERIALIZE_START_MARKER;
 	double		prev_amps;
 	double		chg_rel;
+	double		rechg_W;
 	SERIALIZE_END_MARKER;
 } elec_batt_t;
 
@@ -82,6 +83,9 @@ typedef struct {
 typedef struct {
 	elec_comp_t	*ac;
 	elec_comp_t	*dc;
+	elec_comp_t	*batt;
+	double		prev_amps;
+	double		chgr_regul;
 } elec_tru_t;
 
 typedef struct {
