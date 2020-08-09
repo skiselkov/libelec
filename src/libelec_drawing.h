@@ -25,6 +25,8 @@ extern "C" {
 
 void libelec_draw_layout(const elec_sys_t *sys, cairo_t *cr, double pos_scale,
     double font_sz);
+void libelec_draw_comp_info(const elec_comp_t *comp, cairo_t *cr,
+    double pos_scale, double font_sz, vect2_t pos);
 
 #ifdef __cplusplus
 }

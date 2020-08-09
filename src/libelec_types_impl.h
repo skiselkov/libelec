@@ -68,6 +68,7 @@ typedef struct {
 	double		chg_rel;
 	double		rechg_W;
 	SERIALIZE_END_MARKER;
+	double		T;		/* Kelvin */
 } elec_batt_t;
 
 typedef struct {
@@ -75,6 +76,8 @@ typedef struct {
 	double		ctr_rpm;
 	double		min_stab;
 	double		max_stab;
+	double		eff;
+	double		rpm;
 	SERIALIZE_START_MARKER;
 	double		stab_factor;
 	SERIALIZE_END_MARKER;
@@ -86,6 +89,7 @@ typedef struct {
 	elec_comp_t	*batt;
 	double		prev_amps;
 	double		chgr_regul;
+	double		eff;
 } elec_tru_t;
 
 typedef struct {

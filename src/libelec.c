@@ -1605,7 +1605,14 @@ network_update_gen(elec_comp_t *gen, double d_t)
 
 	rpm = gen->info->gen.get_rpm(gen);
 	ASSERT(!isnan(rpm));
-	rpm = MAX(rpm, 1);
+	rpm = MAX(rpm, 1e-3);
+	gen->gen.rpm = rpm;
+	if (rpm <= 1e-3) {
+		gen->gen.stab_factor = 1;
+		gen->rw.in_volts = 0;
+		gen->rw.out_volts = 0;
+		return;
+	}
 	/*
 	 * Gradual voltage stabilization adjustment, to simulate that
 	 * the CSD takes a little time to adjust to rpm changes.
@@ -1628,16 +1635,16 @@ network_update_gen(elec_comp_t *gen, double d_t)
 static void
 network_update_batt(elec_comp_t *batt, double d_t)
 {
-	double U, J, T, temp_coeff, J_max, I_max, I_rel;
+	double U, J, temp_coeff, J_max, I_max, I_rel;
 
 	ASSERT(batt != NULL);
 	ASSERT(batt->info != NULL);
 	ASSERT3U(batt->info->type, ==, ELEC_BATT);
 	ASSERT(batt->info->batt.get_temp != NULL);
 
-	T = batt->info->batt.get_temp(batt);
-	ASSERT3F(T, >, 0);
-	temp_coeff = fx_lin_multi(T, batt_temp_energy_curve, true);
+	batt->batt.T = batt->info->batt.get_temp(batt);
+	ASSERT3F(batt->batt.T, >, 0);
+	temp_coeff = fx_lin_multi(batt->batt.T, batt_temp_energy_curve, true);
 
 	I_max = batt->info->batt.max_pwr / batt->info->batt.volts;
 	I_rel = batt->batt.prev_amps / I_max;
@@ -2037,8 +2044,6 @@ static void
 network_load_integrate_tru(elec_comp_t *comp, unsigned depth,
     uint64_t src_mask, double d_t)
 {
-	double eff;
-
 	ASSERT(comp != NULL);
 	ASSERT(comp->tru.ac != NULL);
 	ASSERT(comp->tru.dc != NULL);
@@ -2064,11 +2069,12 @@ network_load_integrate_tru(elec_comp_t *comp, unsigned depth,
 	 * on battery chargers.
 	 */
 	comp->tru.prev_amps = comp->rw.out_amps;
-	eff = fx_lin_multi(comp->rw.out_amps, comp->info->tru.eff_curve, true);
-	ASSERT3F(eff, >=, 0);
-	ASSERT3F(eff, <, 1);
+	comp->tru.eff = fx_lin_multi(comp->rw.out_amps,
+	    comp->info->tru.eff_curve, true);
+	ASSERT3F(comp->tru.eff, >=, 0);
+	ASSERT3F(comp->tru.eff, <, 1);
 	comp->rw.in_amps = ((comp->rw.out_volts / comp->rw.in_volts) *
-	    comp->rw.out_amps) / eff;
+	    comp->rw.out_amps) / comp->tru.eff;
 	ASSERT(comp->tru.ac != NULL);
 }
 
@@ -2382,9 +2388,9 @@ network_load_integrate_gen(elec_comp_t *gen, unsigned depth,
 	    src_mask, d_t);
 	gen->rw.out_amps = gen->gen.bus->rw.in_amps;
 	gen->rw.in_volts = gen->rw.out_volts;
-	gen->rw.in_amps = gen->rw.out_amps /
-	    fx_lin_multi(gen->rw.in_volts * gen->rw.out_amps,
+	gen->gen.eff = fx_lin_multi(gen->rw.in_volts * gen->rw.out_amps,
 	    gen->info->gen.eff_curve, true);
+	gen->rw.in_amps = gen->rw.out_amps / gen->gen.eff;
 }
 
 static void
