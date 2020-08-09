@@ -1545,6 +1545,7 @@ network_reset(elec_sys_t *sys)
 	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
 	    comp = list_next(&sys->comps, comp)) {
 		comp->upstream = NULL;
+		comp->src_vis = comp->src;
 		comp->src = NULL;
 
 		comp->rw.in_volts = 0;

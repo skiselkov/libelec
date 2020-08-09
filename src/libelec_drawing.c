@@ -161,7 +161,7 @@ draw_src_path(cairo_t *cr, cairo_path_t *path, const elec_comp_t *comp)
 	ASSERT(path != NULL);
 	ASSERT(comp != NULL);
 
-	src = comp->src;
+	src = comp->src_vis;
 	if (src != NULL) {
 		vect3_t color = src->info->gui.color;
 		cairo_append_path(cr, path);

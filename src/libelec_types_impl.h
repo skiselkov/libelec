@@ -174,6 +174,10 @@ struct elec_comp_s {
 
 	elec_comp_t		*src;
 	elec_comp_t		*upstream;
+	/*
+	 * Version for visualizer to avoid blinking when `src' gets reset.
+	 */
+	elec_comp_t		*src_vis;
 
 	union {
 		elec_batt_t	batt;
