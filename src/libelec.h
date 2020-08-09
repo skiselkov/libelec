@@ -135,6 +135,7 @@ struct elec_comp_info_s {
 		int			rot;
 		gui_load_type_t		load_type;
 		bool			virt;
+		bool			invis;
 		vect3_t			color;
 	} gui;
 };

@@ -1186,6 +1186,9 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 		} else if (strcmp(cmd, "GUI_VIRT") == 0 && n_comps == 1 &&
 		    info != NULL) {
 			info->gui.virt = true;
+		} else if (strcmp(cmd, "GUI_INVIS") == 0 && n_comps == 1 &&
+		    info != NULL) {
+			info->gui.invis = true;
 		} else if (strcmp(cmd, "GUI_COLOR") == 0 && n_comps == 4 &&
 		    info != NULL) {
 			info->gui.color = VECT3(atof(comps[1]),
