@@ -101,8 +101,10 @@ hit_test(libelec_vis_t *vis, int x, int y)
 		vect2_t pos, sz;
 
 		pos = comp->info->gui.pos;
-		if (IS_NULL_VECT(pos) || comp->info->gui.virt)
+		if (IS_NULL_VECT(pos) || comp->info->gui.virt ||
+		    comp->info->gui.invis) {
 			continue;
+		}
 		sz = comp_info2sz(comp->info);
 		if (mouse.x >= pos.x - sz.x / 2 &&
 		    mouse.x < pos.x + sz.x / 2 &&

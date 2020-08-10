@@ -1140,8 +1140,8 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 				goto errout;
 			}
 		} else if ((strcmp(cmd, "LOADCB") == 0 ||
-		    strcmp(cmd, "LOADCB3") == 0) && n_comps == 2 &&
-		    info != NULL && info->type == ELEC_LOAD) {
+		    strcmp(cmd, "LOADCB3") == 0) && (n_comps == 2 ||
+		    n_comps == 3) && info != NULL && info->type == ELEC_LOAD) {
 			elec_comp_info_t *cb, *bus;
 
 			ASSERT3U(comp_i + 1, <, num_comps);
@@ -1152,6 +1152,10 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 			cb->cb.max_amps = atof(comps[1]);
 			cb->cb.triphase = (strcmp(cmd, "LOADCB3") == 0);
 			cb->autogen = true;
+			if (n_comps == 3) {
+				strlcpy(cb->location, comps[2],
+				    sizeof (cb->location));
+			}
 
 			bus = &infos[comp_i++];
 			bus->type = ELEC_BUS;
@@ -1220,6 +1224,10 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 				free_strlist(comps, n_comps);
 				goto errout;
 			}
+		} else if (strcmp(cmd, "LOCATION") == 0 && n_comps == 2 &&
+		    info != NULL) {
+			strlcpy(info->location, comps[1],
+			    sizeof (info->location));
 		} else {
 			logMsg("%s:%d: unknown or malformed line",
 			    filename, linenum);

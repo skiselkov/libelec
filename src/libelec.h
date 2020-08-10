@@ -120,6 +120,7 @@ struct elec_comp_info_s {
 	char				*name;
 	void				*userinfo;
 	bool				autogen;
+	char				location[32];
 	union {
 		elec_batt_info_t	batt;
 		elec_gen_info_t		gen;
