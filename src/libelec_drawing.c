@@ -554,7 +554,8 @@ draw_tie(cairo_t *cr, double pos_scale, const elec_comp_t *tie)
 }
 
 static void
-draw_diode(cairo_t *cr, double pos_scale, const elec_comp_t *diode)
+draw_diode(cairo_t *cr, double pos_scale, const elec_comp_t *diode,
+    bool draw_line)
 {
 	vect2_t pos;
 
@@ -572,6 +573,10 @@ draw_diode(cairo_t *cr, double pos_scale, const elec_comp_t *diode)
 	cairo_set_line_width(cr, 4);
 	cairo_move_to(cr, PX(0.5), PX(-0.8));
 	cairo_rel_line_to(cr, 0, PX(1.6));
+	if (draw_line) {
+		cairo_move_to(cr, PX(-2), 0);
+		cairo_rel_line_to(cr, PX(4), 0);
+	}
 	cairo_stroke(cr);
 	cairo_restore(cr);
 
@@ -720,7 +725,7 @@ libelec_draw_layout(const elec_sys_t *sys, cairo_t *cr, double pos_scale,
 			draw_tie(cr, pos_scale, comp);
 			break;
 		case ELEC_DIODE:
-			draw_diode(cr, pos_scale, comp);
+			draw_diode(cr, pos_scale, comp, false);
 			break;
 		case ELEC_LOAD:
 			draw_load(cr, pos_scale, font_sz, info);
@@ -836,15 +841,15 @@ static void
 draw_diode_info(const elec_comp_t *diode, cairo_t *cr, double pos_scale,
     double font_sz, vect2_t pos)
 {
-	const double TEXT_OFF_X = -5.5, TEXT_OFF_Y = 2.5;
+	const double TEXT_OFF_X = -6.5, TEXT_OFF_Y = 2.5;
 
 	ASSERT(diode != NULL);
 	ASSERT(diode->info != NULL);
 	ASSERT3U(diode->info->type, ==, ELEC_DIODE);
 
-	draw_comp_bg(cr, pos_scale, VECT2(pos.x, pos.y + 3), VECT2(12, 10));
+	draw_comp_bg(cr, pos_scale, VECT2(pos.x, pos.y + 3), VECT2(14, 10));
 
-	draw_diode(cr, pos_scale, diode);
+	draw_diode(cr, pos_scale, diode, true);
 	show_text_aligned(cr, PX(pos.x + TEXT_OFF_X), PX(pos.y + TEXT_OFF_Y),
 	    TEXT_ALIGN_LEFT, "Type: Diode");
 	draw_comp_info(diode, cr, pos_scale, font_sz,
@@ -966,14 +971,14 @@ static void
 draw_tie_info(const elec_comp_t *tie, cairo_t *cr, double pos_scale,
     double font_sz, vect2_t pos)
 {
-	const double TEXT_OFF_X = -5.5, TEXT_OFF_Y = 3;
+	const double TEXT_OFF_X = -6.5, TEXT_OFF_Y = 3;
 	double y;
 
 	ASSERT(tie != NULL);
 	ASSERT(tie->info != NULL);
 	ASSERT3U(tie->info->type, ==, ELEC_TIE);
 
-	draw_comp_bg(cr, pos_scale, VECT2(pos.x, pos.y + 3), VECT2(12, 10));
+	draw_comp_bg(cr, pos_scale, VECT2(pos.x, pos.y + 3), VECT2(14, 10));
 	draw_tie(cr, pos_scale, tie);
 
 	y = pos.y + TEXT_OFF_Y;
@@ -1019,6 +1024,40 @@ draw_batt_info(const elec_comp_t *batt, cairo_t *cr, double pos_scale,
 	    VECT2(pos.x + TEXT_OFF_X, y));
 }
 
+static void
+draw_load_info(const elec_comp_t *load, cairo_t *cr, double pos_scale,
+    double font_sz, vect2_t pos)
+{
+	const double TEXT_OFF_X = -6.5, TEXT_OFF_Y = 3;
+	const char *type;
+	double y;
+
+	ASSERT(load != NULL);
+	ASSERT(load->info != NULL);
+	ASSERT3U(load->info->type, ==, ELEC_LOAD);
+
+	draw_comp_bg(cr, pos_scale, VECT2(pos.x, pos.y + 3), VECT2(14, 10));
+	draw_load(cr, pos_scale, font_sz, load->info);
+
+	y = pos.y + TEXT_OFF_Y;
+
+	switch (load->info->gui.load_type) {
+	case GUI_LOAD_MOTOR:
+		type = "Motor";
+		break;
+	default:
+		type = "Load";
+		break;
+	}
+
+	show_text_aligned(cr, PX(pos.x + TEXT_OFF_X), PX(y), TEXT_ALIGN_LEFT,
+	    "Type: %s", type);
+	y += LINE_HEIGHT;
+
+	draw_comp_info(load, cr, pos_scale, font_sz,
+	    VECT2(pos.x + TEXT_OFF_X, y));
+}
+
 void
 libelec_draw_comp_info(const elec_comp_t *comp, cairo_t *cr,
     double pos_scale, double font_sz, vect2_t pos)
@@ -1042,6 +1081,7 @@ libelec_draw_comp_info(const elec_comp_t *comp, cairo_t *cr,
 		draw_tru_info(comp, cr, pos_scale, font_sz, pos);
 		break;
 	case ELEC_LOAD:
+		draw_load_info(comp, cr, pos_scale, font_sz, pos);
 		break;
 	case ELEC_BUS:
 		break;
