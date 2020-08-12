@@ -3079,7 +3079,7 @@ libelec_tie_get_num_buses(const elec_comp_t *comp)
 }
 
 bool
-libelec_tie_get_list(elec_comp_t *tie, bool exclusive, ...)
+libelec_tie_get_list(elec_comp_t *tie, bool_t exclusive, ...)
 {
 	va_list ap;
 	bool res;
