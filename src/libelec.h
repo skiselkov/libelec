@@ -53,9 +53,10 @@ typedef struct {
 } elec_batt_info_t;
 
 typedef struct elec_gen_info_s {
-	bool	ac;		/* true = AC, false = DC */
 	double	volts;		/* nominal voltage at operating rpm */
-	double	stab_rate;	/* stabilization adaptation rate (FILTER_IN) */
+	double	freq;		/* nominal frequency at operating rpm */
+	double	stab_rate_U;	/* stabilization adaptation rate (FILTER_IN) */
+	double	stab_rate_f;	/* stabilization adaptation rate (FILTER_IN) */
 	double	min_rpm;	/* min rpm at which volts can be achieved */
 	double	max_rpm;	/* max rpm above which regulation fails */
 	double	max_pwr;	/* max power draw in Watts */
@@ -192,7 +193,11 @@ double libelec_comp_get_in_amps(const elec_comp_t *comp);
 double libelec_comp_get_out_amps(const elec_comp_t *comp);
 double libelec_comp_get_in_pwr(const elec_comp_t *comp);
 double libelec_comp_get_out_pwr(const elec_comp_t *comp);
+double libelec_comp_get_in_freq(const elec_comp_t *comp);
+double libelec_comp_get_out_freq(const elec_comp_t *comp);
 double libelec_comp_get_incap_volts(const elec_comp_t *comp);
+
+bool libelec_comp_is_AC(const elec_comp_t *comp);
 
 void libelec_comp_set_failed(elec_comp_t *comp, bool failed);
 bool libelec_comp_get_failed(const elec_comp_t *comp);

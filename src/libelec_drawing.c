@@ -256,7 +256,7 @@ draw_gen(cairo_t *cr, double pos_scale, const elec_comp_info_t *info)
 	cairo_set_line_width(cr, 2);
 	cairo_set_source_rgb(cr, 0, 0, 0);
 	cairo_arc(cr, PX(pos.x), PX(pos.y), PX(1.2), 0, DEG2RAD(360));
-	if (info->gen.ac) {
+	if (info->gen.freq != 0) {
 		cairo_move_to(cr, PX(pos.x - 0.9), PX(pos.y));
 		cairo_rel_curve_to(cr, PX(0.2), PX(-0.7),
 		    PX(0.7), PX(-0.7), PX(0.9), 0);
@@ -764,7 +764,8 @@ static void
 draw_comp_info(const elec_comp_t *comp, cairo_t *cr, double pos_scale,
     double font_sz, vect2_t pos)
 {
-	double U_in, I_in, W_in, U_out, I_out, W_out;
+	bool ac;
+	double U_in, I_in, W_in, U_out, I_out, W_out, f;
 	const elec_comp_t *src;
 
 	ASSERT(comp != NULL);
@@ -773,6 +774,8 @@ draw_comp_info(const elec_comp_t *comp, cairo_t *cr, double pos_scale,
 
 	U_in = libelec_comp_get_in_volts(comp);
 	U_out = libelec_comp_get_out_volts(comp);
+	ac = libelec_comp_is_AC(comp);
+	f = (ac ? libelec_comp_get_in_freq(comp) : 0);
 	I_in = libelec_comp_get_in_amps(comp);
 	I_out = libelec_comp_get_out_amps(comp);
 	W_in = libelec_comp_get_in_pwr(comp);
@@ -789,31 +792,37 @@ draw_comp_info(const elec_comp_t *comp, cairo_t *cr, double pos_scale,
 	case ELEC_BATT:
 	case ELEC_TRU:
 		cairo_set_font_size(cr, 0.75 * font_sz);
-		for (int i = 0; i < 6; i++) {
+		for (int i = 0; i < (ac ? 7 : 6); i++) {
 			show_text_aligned(cr, PX(pos.x + 0.5),
 			    PX(pos.y + (i + 0.25) * LINE_HEIGHT),
-			    TEXT_ALIGN_LEFT, i < 3 ? "IN" : "OUT");
+			    TEXT_ALIGN_LEFT, (i < (ac ? 4 : 3)) ? "IN" : "OUT");
 		}
 
 		cairo_set_font_size(cr, font_sz);
-		show_text_aligned(cr, PX(pos.x), PX(pos.y),
-		    TEXT_ALIGN_LEFT, "U   : %.*fV", fixed_decimals(U_in, 3),
-		    U_in);
-		show_text_aligned(cr, PX(pos.x), PX(pos.y + LINE_HEIGHT),
-		    TEXT_ALIGN_LEFT, "I   : %.*fA", fixed_decimals(I_in, 3),
-		    I_in);
-		show_text_aligned(cr, PX(pos.x), PX(pos.y + 2 * LINE_HEIGHT),
-		    TEXT_ALIGN_LEFT, "W   : %.*fW", fixed_decimals(W_in, 3),
-		    W_in);
-		show_text_aligned(cr, PX(pos.x), PX(pos.y + 3 * LINE_HEIGHT),
-		    TEXT_ALIGN_LEFT, "U   : %.*fV", fixed_decimals(U_out, 3),
-		    U_out);
-		show_text_aligned(cr, PX(pos.x), PX(pos.y + 4 * LINE_HEIGHT),
-		    TEXT_ALIGN_LEFT, "I   : %.*fA", fixed_decimals(I_out, 3),
-		    I_out);
-		show_text_aligned(cr, PX(pos.x), PX(pos.y + 5 * LINE_HEIGHT),
-		    TEXT_ALIGN_LEFT, "W   : %.*fW", fixed_decimals(W_out, 3),
-		    W_out);
+		show_text_aligned(cr, PX(pos.x), PX(pos.y), TEXT_ALIGN_LEFT,
+		    "U   : %.*fV", fixed_decimals(U_in, 4), U_in);
+		pos.y += LINE_HEIGHT;
+		if (ac) {
+			show_text_aligned(cr, PX(pos.x), PX(pos.y),
+			    TEXT_ALIGN_LEFT, "f   : %.*fHz",
+			    fixed_decimals(f, 4), f);
+			pos.y += LINE_HEIGHT;
+		}
+		show_text_aligned(cr, PX(pos.x), PX(pos.y), TEXT_ALIGN_LEFT,
+		    "I   : %.*fA", fixed_decimals(I_in, 4), I_in);
+		pos.y += LINE_HEIGHT;
+		show_text_aligned(cr, PX(pos.x), PX(pos.y), TEXT_ALIGN_LEFT,
+		    "W   : %.*fW", fixed_decimals(W_in, 4), W_in);
+		pos.y += LINE_HEIGHT;
+		show_text_aligned(cr, PX(pos.x), PX(pos.y), TEXT_ALIGN_LEFT,
+		    "U   : %.*fV", fixed_decimals(U_out, 4), U_out);
+		pos.y += LINE_HEIGHT;
+		show_text_aligned(cr, PX(pos.x), PX(pos.y), TEXT_ALIGN_LEFT,
+		    "I   : %.*fA", fixed_decimals(I_out, 4), I_out);
+		pos.y += LINE_HEIGHT;
+		show_text_aligned(cr, PX(pos.x), PX(pos.y), TEXT_ALIGN_LEFT,
+		    "W   : %.*fW", fixed_decimals(W_out, 4), W_out);
+		pos.y += LINE_HEIGHT;
 		break;
 	case ELEC_BUS:
 	case ELEC_GEN:
@@ -823,11 +832,19 @@ draw_comp_info(const elec_comp_t *comp, cairo_t *cr, double pos_scale,
 	case ELEC_TIE:
 	case ELEC_DIODE:
 		show_text_aligned(cr, PX(pos.x), PX(pos.y),
-		    TEXT_ALIGN_LEFT, "U: %.*fV", fixed_decimals(U_in, 3), U_in);
-		show_text_aligned(cr, PX(pos.x), PX(pos.y + LINE_HEIGHT),
-		    TEXT_ALIGN_LEFT, "I: %.*fA", fixed_decimals(I_in, 3), I_in);
-		show_text_aligned(cr, PX(pos.x), PX(pos.y + 2 * LINE_HEIGHT),
-		    TEXT_ALIGN_LEFT, "W: %.*fW", fixed_decimals(W_in, 3), W_in);
+		    TEXT_ALIGN_LEFT, "U: %.*fV", fixed_decimals(U_in, 4), U_in);
+		pos.y += LINE_HEIGHT;
+		if (ac) {
+			show_text_aligned(cr, PX(pos.x), PX(pos.y),
+			    TEXT_ALIGN_LEFT, "f: %.*fHz",
+			    fixed_decimals(f, 4), f);
+			pos.y += LINE_HEIGHT;
+		}
+		show_text_aligned(cr, PX(pos.x), PX(pos.y),
+		    TEXT_ALIGN_LEFT, "I: %.*fA", fixed_decimals(I_in, 4), I_in);
+		pos.y += LINE_HEIGHT;
+		show_text_aligned(cr, PX(pos.x), PX(pos.y),
+		    TEXT_ALIGN_LEFT, "W: %.*fW", fixed_decimals(W_in, 4), W_in);
 		break;
 	}
 }
@@ -857,14 +874,16 @@ draw_scb_info(const elec_comp_t *cb, cairo_t *cr, double pos_scale,
 {
 	const double TEXT_OFF_X = -6.5, TEXT_OFF_Y = 2.5;
 	const char *type;
-	double y, height;
+	double y, height, box_y_off;
 
 	ASSERT(cb != NULL);
 	ASSERT(cb->info != NULL);
 	ASSERT(cb->info->type == ELEC_CB || cb->info->type == ELEC_SHUNT);
 
-	height = (cb->info->type == ELEC_CB ? 13 : 12);
-	draw_comp_bg(cr, pos_scale, VECT2(pos.x, pos.y + 4), VECT2(14, height));
+	height = (cb->info->type == ELEC_CB ? 14 : 12);
+	box_y_off = (cb->info->type == ELEC_CB ? 5 : 4);
+	draw_comp_bg(cr, pos_scale, VECT2(pos.x, pos.y + box_y_off),
+	    VECT2(14, height));
 
 	if (cb->info->type == ELEC_CB) {
 		draw_cb(cr, pos_scale, cb, font_sz,
@@ -921,7 +940,7 @@ draw_gen_info(const elec_comp_t *gen, cairo_t *cr, double pos_scale,
 	y = pos.y + TEXT_OFF_Y;
 
 	show_text_aligned(cr, PX(pos.x + TEXT_OFF_X), PX(y), TEXT_ALIGN_LEFT,
-	    "Type: %s Generator", gen->info->gen.ac ? "AC" : "DC");
+	    "Type: %s Generator", gen->info->gen.freq != 0 ? "AC" : "DC");
 	y += LINE_HEIGHT;
 
 	show_text_aligned(cr, PX(pos.x + TEXT_OFF_X), PX(y), TEXT_ALIGN_LEFT,
@@ -947,7 +966,8 @@ draw_tru_info(const elec_comp_t *tru, cairo_t *cr, double pos_scale,
 	ASSERT(tru->info != NULL);
 	ASSERT3U(tru->info->type, ==, ELEC_TRU);
 
-	draw_comp_bg(cr, pos_scale, VECT2(pos.x - 2, pos.y + 5), VECT2(14, 15));
+	draw_comp_bg(cr, pos_scale, VECT2(pos.x - 2, pos.y + 5.5),
+	    VECT2(14, 15.5));
 	draw_tru(cr, pos_scale, tru->info);
 
 	y = pos.y + TEXT_OFF_Y;
@@ -976,7 +996,7 @@ draw_tie_info(const elec_comp_t *tie, cairo_t *cr, double pos_scale,
 	ASSERT(tie->info != NULL);
 	ASSERT3U(tie->info->type, ==, ELEC_TIE);
 
-	draw_comp_bg(cr, pos_scale, VECT2(pos.x, pos.y + 3), VECT2(14, 10));
+	draw_comp_bg(cr, pos_scale, VECT2(pos.x, pos.y + 3.5), VECT2(14, 11));
 	draw_tie(cr, pos_scale, tie);
 
 	y = pos.y + TEXT_OFF_Y;

@@ -74,12 +74,15 @@ typedef struct {
 typedef struct {
 	elec_comp_t	*bus;
 	double		ctr_rpm;
-	double		min_stab;
-	double		max_stab;
+	double		min_stab_U;
+	double		max_stab_U;
+	double		min_stab_f;
+	double		max_stab_f;
 	double		eff;
 	double		rpm;
 	SERIALIZE_START_MARKER;
-	double		stab_factor;
+	double		stab_factor_U;
+	double		stab_factor_f;
 	SERIALIZE_END_MARKER;
 } elec_gen_t;
 
@@ -163,6 +166,8 @@ struct elec_comp_s {
 		double		out_amps;
 		double		in_pwr;		/* Watts */
 		double		out_pwr;	/* Watts */
+		double		in_freq;	/* Hz */
+		double		out_freq;	/* Hz */
 		bool		failed;
 		/*
 		 * Shorted components leak a lot of their energy out

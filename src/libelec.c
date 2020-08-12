@@ -122,6 +122,14 @@ elec_draw_cb(XPLMDrawingPhase phase, int before, void *refcon)
 }
 #endif	/* defined(XPLANE) */
 
+static inline bool
+gen_is_AC(const elec_comp_info_t *info)
+{
+	ASSERT(info != NULL);
+	ASSERT3U(info->type, ==, ELEC_GEN);
+	return (info->gen.freq != 0);
+}
+
 static int
 user_cb_info_compar(const void *a, const void *b)
 {
@@ -209,7 +217,7 @@ resolve_bus_links(elec_sys_t *sys, elec_comp_t *bus)
 			break;
 		case ELEC_GEN:
 			/* Generators can be DC or AC */
-			ASSERT3U(bus->info->bus.ac, ==, comp->info->gen.ac);
+			ASSERT3U(bus->info->bus.ac, ==, gen_is_AC(comp->info));
 			comp->gen.bus = bus;
 			break;
 		case ELEC_TRU:
@@ -408,10 +416,16 @@ libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 			ASSERT(comp->info->gen.get_rpm != NULL);
 			comp->gen.ctr_rpm = AVG(comp->info->gen.min_rpm,
 			    comp->info->gen.max_rpm);
-			comp->gen.max_stab =
+			comp->gen.max_stab_U =
 			    comp->gen.ctr_rpm / comp->info->gen.min_rpm;
-			comp->gen.min_stab =
+			comp->gen.min_stab_U =
 			    comp->gen.ctr_rpm / comp->info->gen.max_rpm;
+			if (comp->info->gen.stab_rate_f > 0) {
+				comp->gen.max_stab_f = comp->gen.ctr_rpm /
+				    comp->info->gen.min_rpm;
+				comp->gen.min_stab_f = comp->gen.ctr_rpm /
+				    comp->info->gen.max_rpm;
+			}
 			break;
 		case ELEC_TRU:
 			ASSERT3F(comp->info->tru.in_volts, >, 0);
@@ -937,7 +951,7 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 			info = &infos[comp_i++];
 			info->type = ELEC_GEN;
 			info->name = strdup(comps[1]);
-			info->gen.ac = (strcmp(comps[2], "AC") == 0);
+			info->gen.freq = atof(comps[2]);
 		} else if (strcmp(cmd, "TRU") == 0 && n_comps == 2) {
 			ASSERT3U(comp_i, <, num_comps);
 			CHECK_DUP_NAME(comps[1]);
@@ -1027,7 +1041,11 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 			info->load.stab = (strcmp(comps[1], "TRUE") == 0);
 		} else if (strcmp(cmd, "STAB_RATE") == 0 && n_comps == 2 &&
 		    info != NULL && info->type == ELEC_GEN) {
-			info->gen.stab_rate = atof(comps[1]);
+			info->gen.stab_rate_U = atof(comps[1]);
+		} else if (strcmp(cmd, "STAB_RATE_F") == 0 && n_comps == 2 &&
+		    info != NULL && info->type == ELEC_GEN) {
+			ASSERT(info->gen.freq != 0);
+			info->gen.stab_rate_f = atof(comps[1]);
 		} else if (strcmp(cmd, "MIN_RPM") == 0 && n_comps == 2 &&
 		    info != NULL && info->type == ELEC_GEN) {
 			info->gen.min_rpm = atof(comps[1]);
@@ -1509,12 +1527,71 @@ libelec_comp_get_out_pwr(const elec_comp_t *comp)
 }
 
 double
+libelec_comp_get_in_freq(const elec_comp_t *comp)
+{
+	double freq;
+
+	ASSERT(comp != NULL);
+
+	mutex_enter((mutex_t *)&comp->rw_ro_lock);
+	freq = comp->ro.in_freq;
+	mutex_exit((mutex_t *)&comp->rw_ro_lock);
+
+	return (freq);
+}
+
+double
+libelec_comp_get_out_freq(const elec_comp_t *comp)
+{
+	double freq;
+
+	ASSERT(comp != NULL);
+
+	mutex_enter((mutex_t *)&comp->rw_ro_lock);
+	freq = comp->ro.out_freq;
+	mutex_exit((mutex_t *)&comp->rw_ro_lock);
+
+	return (freq);
+}
+
+double
 libelec_comp_get_incap_volts(const elec_comp_t *comp)
 {
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
 	ASSERT3U(comp->info->type, ==, ELEC_LOAD);
 	return (comp->load.incap_U);
+}
+
+bool
+libelec_comp_is_AC(const elec_comp_t *comp)
+{
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+	switch (comp->info->type) {
+	case ELEC_BATT:
+	case ELEC_DIODE:
+		return (false);
+	case ELEC_TRU:
+		return (true);
+	case ELEC_GEN:
+		return (comp->info->gen.freq != 0);
+	case ELEC_LOAD:
+		ASSERT(comp->load.bus != NULL);
+		return (comp->load.bus->info->bus.ac);
+	case ELEC_BUS:
+		return (comp->info->bus.ac);
+	case ELEC_CB:
+	case ELEC_SHUNT:
+		ASSERT(comp->scb.sides[0] != 0);
+		return (comp->scb.sides[0]->info->bus.ac);
+		break;
+	case ELEC_TIE:
+		ASSERT(comp->tie.n_buses != 0);
+		ASSERT(comp->tie.buses[0] != NULL);
+		return (comp->tie.buses[0]->info->bus.ac);
+	}
+	VERIFY_FAIL();
 }
 
 void
@@ -1559,9 +1636,11 @@ network_reset(elec_sys_t *sys)
 		comp->rw.in_volts = 0;
 		comp->rw.in_pwr = 0;
 		comp->rw.in_amps = 0;
+		comp->rw.in_freq = 0;
 		comp->rw.out_volts = 0;
 		comp->rw.out_pwr = 0;
 		comp->rw.out_amps = 0;
+		comp->rw.out_freq = 0;
 
 		mutex_enter(&comp->rw_ro_lock);
 		comp->rw.failed = comp->ro.failed;
@@ -1604,7 +1683,7 @@ network_reset(elec_sys_t *sys)
 static void
 network_update_gen(elec_comp_t *gen, double d_t)
 {
-	double rpm, stab_factor;
+	double rpm;
 
 	ASSERT(gen != NULL);
 	ASSERT(gen->info != NULL);
@@ -1616,27 +1695,50 @@ network_update_gen(elec_comp_t *gen, double d_t)
 	rpm = MAX(rpm, 1e-3);
 	gen->gen.rpm = rpm;
 	if (rpm <= 1e-3) {
-		gen->gen.stab_factor = 1;
+		gen->gen.stab_factor_U = 1;
+		gen->gen.stab_factor_f = 1;
 		gen->rw.in_volts = 0;
+		gen->rw.in_freq = 0;
 		gen->rw.out_volts = 0;
+		gen->rw.out_freq = 0;
 		return;
 	}
 	/*
-	 * Gradual voltage stabilization adjustment, to simulate that
-	 * the CSD takes a little time to adjust to rpm changes.
+	 * Gradual voltage & frequency stabilization adjustment, to simulate
+	 * that the CSD takes a little time to adjust to rpm changes.
 	 */
-	stab_factor = clamp(gen->gen.ctr_rpm / rpm,
-	    gen->gen.min_stab, gen->gen.max_stab);
-	FILTER_IN(gen->gen.stab_factor, stab_factor, d_t,
-	    gen->info->gen.stab_rate);
-
+	if (gen->info->gen.stab_rate_U > 0) {
+		double stab_factor_U = clamp(gen->gen.ctr_rpm / rpm,
+		    gen->gen.min_stab_U, gen->gen.max_stab_U);
+		double stab_rate_mod =
+		    clamp(1 + crc64_rand_normal(0.1), 0.1, 10);
+		FILTER_IN(gen->gen.stab_factor_U, stab_factor_U, d_t,
+		    gen->info->gen.stab_rate_U * stab_rate_mod);
+	} else {
+		gen->gen.stab_factor_U = 1;
+	}
+	if (gen->info->gen.stab_rate_f > 0) {
+		double stab_factor_f = clamp(gen->gen.ctr_rpm / rpm,
+		    gen->gen.min_stab_f, gen->gen.max_stab_f);
+		double stab_rate_mod =
+		    clamp(1 + crc64_rand_normal(0.1), 0.1, 10);
+		FILTER_IN(gen->gen.stab_factor_f, stab_factor_f, d_t,
+		    gen->info->gen.stab_rate_f * stab_rate_mod);
+	} else {
+		gen->gen.stab_factor_f = 1;
+	}
 	if (!gen->rw.failed) {
 		gen->rw.in_volts = (rpm / gen->gen.ctr_rpm) *
-		    gen->gen.stab_factor * gen->info->gen.volts;
+		    gen->gen.stab_factor_U * gen->info->gen.volts;
+		gen->rw.in_freq = (rpm / gen->gen.ctr_rpm) *
+		    gen->gen.stab_factor_f * gen->info->gen.freq;
 		gen->rw.out_volts = gen->rw.in_volts;
+		gen->rw.out_freq = gen->rw.in_freq;
 	} else {
 		gen->rw.in_volts = 0;
+		gen->rw.in_freq = 0;
 		gen->rw.out_volts = 0;
+		gen->rw.out_freq = 0;
 	}
 }
 
@@ -1823,6 +1925,9 @@ network_paint_src_bus(elec_comp_t *src, elec_comp_t *upstream,
 		comp->src = src;
 		comp->upstream = upstream;
 		comp->rw.in_volts = src->rw.out_volts;
+		comp->rw.in_freq = src->rw.out_freq;
+		comp->rw.out_volts = comp->rw.in_volts;
+		comp->rw.out_freq = comp->rw.in_freq;
 
 		for (unsigned i = 0; i < comp->bus.n_comps; i++) {
 			if (upstream != comp->bus.comps[i]) {
@@ -1857,6 +1962,7 @@ network_paint_src_tie(elec_comp_t *src, elec_comp_t *upstream,
 					comp->src = src;
 					comp->upstream = upstream;
 					comp->rw.in_volts = src->rw.out_volts;
+					comp->rw.in_freq = src->rw.out_freq;
 				}
 				tied = true;
 			}
@@ -1893,11 +1999,13 @@ network_paint_src_tru(elec_comp_t *src, elec_comp_t *upstream,
 		comp->upstream = upstream;
 		if (!comp->rw.failed) {
 			comp->rw.in_volts = src->rw.out_volts;
+			comp->rw.in_freq = src->rw.out_freq;
 			comp->rw.out_volts = comp->tru.chgr_regul *
 			    comp->info->tru.out_volts *
 			    (comp->rw.in_volts / comp->info->tru.in_volts);
 		} else {
 			comp->rw.in_volts = 0;
+			comp->rw.in_freq = 0;
 			comp->rw.out_volts = 0;
 		}
 		ASSERT(comp->tru.dc != NULL);
@@ -1924,7 +2032,9 @@ network_paint_src_scb(elec_comp_t *src, elec_comp_t *upstream,
 		comp->src = src;
 		comp->upstream = upstream;
 		comp->rw.in_volts = src->rw.out_volts;
+		comp->rw.in_freq = src->rw.out_freq;
 		comp->rw.out_volts = src->rw.out_volts;
+		comp->rw.out_freq = src->rw.out_freq;
 		if (upstream == comp->scb.sides[0]) {
 			ASSERT(comp->scb.sides[1] != NULL);
 			network_paint_src_comp(src, comp, comp->scb.sides[1],
@@ -1953,6 +2063,7 @@ network_paint_src_diode(elec_comp_t *src, elec_comp_t *upstream,
 	    comp->rw.in_volts < src->rw.out_volts) {
 		comp->src = src;
 		comp->upstream = upstream;
+		ASSERT0(src->rw.out_freq);
 		if (!comp->rw.failed)
 			comp->rw.in_volts = src->rw.out_volts;
 		else
@@ -1986,7 +2097,7 @@ network_paint_src_comp(elec_comp_t *src, elec_comp_t *upstream,
 		if (src->info->type == ELEC_BATT || src->info->type == ELEC_TRU)
 			ASSERT(!comp->info->bus.ac);
 		else
-			ASSERT3U(comp->info->gen.ac, ==, comp->info->bus.ac);
+			ASSERT3U(gen_is_AC(src->info), ==, comp->info->bus.ac);
 		network_paint_src_bus(src, upstream, comp, depth);
 		break;
 	case ELEC_TRU:
@@ -1996,10 +2107,13 @@ network_paint_src_comp(elec_comp_t *src, elec_comp_t *upstream,
 		if (comp->rw.in_volts < src->rw.out_volts) {
 			comp->src = src;
 			comp->upstream = upstream;
-			if (!comp->rw.failed)
+			if (!comp->rw.failed) {
 				comp->rw.in_volts = src->rw.out_volts;
-			else
+				comp->rw.in_freq = src->rw.out_freq;
+			} else {
 				comp->rw.in_volts = 0;
+				comp->rw.in_freq = 0;
+			}
 		}
 		break;
 	case ELEC_CB:
@@ -2256,6 +2370,7 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 		comp->rw.in_amps = load_I + incap_I;
 		comp->rw.out_amps = load_I;
 		comp->rw.out_volts = comp->rw.in_volts;
+		comp->rw.out_freq = comp->rw.in_freq;
 		comp->load.incap_d_Q = incap_I * d_t;
 	}
 	ASSERT(!isnan(comp->rw.out_amps));
@@ -2357,6 +2472,8 @@ network_load_integrate_batt(const elec_comp_t *src, elec_comp_t *batt,
 
 	if (src != batt && batt->src == src) {
 		double U_delta = MAX(src->rw.out_volts - batt->rw.out_volts, 0);
+
+		ASSERT0(src->rw.out_freq);
 		if (batt->batt.chg_rel < 1) {
 			double R = batt->info->batt.chg_R /
 			    (1 - batt->batt.chg_rel);
@@ -2396,6 +2513,7 @@ network_load_integrate_gen(elec_comp_t *gen, unsigned depth,
 	    src_mask, d_t);
 	gen->rw.out_amps = gen->gen.bus->rw.in_amps;
 	gen->rw.in_volts = gen->rw.out_volts;
+	gen->rw.in_freq = gen->rw.out_freq;
 	gen->gen.eff = fx_lin_multi(gen->rw.in_volts * gen->rw.out_amps,
 	    gen->info->gen.eff_curve, true);
 	gen->rw.in_amps = gen->rw.out_amps / gen->gen.eff;
@@ -2659,8 +2777,11 @@ network_integrity_check(elec_sys_t *sys)
 			if (comp->src != NULL) {
 				ASSERT3F(comp->rw.in_volts, ==,
 				    comp->src->rw.out_volts);
+				ASSERT3F(comp->rw.in_freq, ==,
+				    comp->src->rw.out_freq);
 			} else {
 				ASSERT0(comp->rw.in_volts);
+				ASSERT0(comp->rw.in_freq);
 			}
 			E_out += comp->rw.in_volts * comp->rw.in_amps;
 		} else if (comp->info->type == ELEC_TRU) {
