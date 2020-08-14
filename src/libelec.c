@@ -2173,14 +2173,25 @@ network_load_integrate_tru(elec_comp_t *comp, unsigned depth,
 	ASSERT3U(comp->info->type, ==, ELEC_TRU);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
-	if (comp->tru.dc->upstream != comp)
+	if (comp->tru.dc->upstream != comp) {
+		/*
+		 * Don't forget to reset prev_amps - this resets the current
+		 * regulator circuit of chargers to prevent stopping to
+		 * charge if for some reason our output voltage drops below
+		 * the associated battery voltage.
+		 */
+		comp->tru.prev_amps = 0;
+		comp->rw.in_amps = 0;
+		comp->rw.out_amps = 0;
 		return;
+	}
 
 	/* When hopping over to the DC network, the TRU becomes the src */
 	network_load_integrate_comp(comp, comp, comp->tru.dc, depth + 1,
 	    src_mask, d_t);
 
 	if (comp->rw.failed || comp->rw.in_volts == 0) {
+		comp->tru.prev_amps = 0;
 		comp->rw.in_amps = 0;
 		comp->rw.out_amps = 0;
 		return;
