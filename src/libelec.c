@@ -1834,8 +1834,21 @@ network_update_tru(elec_comp_t *tru, double d_t)
 		double oc_ratio = tru->tru.prev_amps / tru->info->tru.curr_lim;
 		double regul_tgt = clamp(oc_ratio > 0 ?
 		    tru->tru.chgr_regul / oc_ratio : 1, 0, 1);
-		FILTER_IN(tru->tru.chgr_regul, regul_tgt,
-		    USEC2SEC(EXEC_INTVAL), 0.2);
+		if (oc_ratio > 4) {
+			/*
+			 * When a super-high current consumer is persistently
+			 * on, we might blow our output breaker by trying to
+			 * keep on charging. So just back off completely and
+			 * slowly come up later to retry.
+			 */
+			tru->tru.chgr_regul = 0;
+		} else if (regul_tgt > tru->tru.chgr_regul) {
+			FILTER_IN(tru->tru.chgr_regul, regul_tgt,
+			    USEC2SEC(EXEC_INTVAL), 1);
+		} else {
+			FILTER_IN(tru->tru.chgr_regul, regul_tgt,
+			    USEC2SEC(EXEC_INTVAL), 2 * USEC2SEC(EXEC_INTVAL));
+		}
 	}
 }
 
