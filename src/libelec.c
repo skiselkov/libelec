@@ -3215,6 +3215,18 @@ libelec_batt_set_chg_rel(elec_comp_t *batt, double chg_rel)
 	mutex_exit(&batt->sys->worker_interlock);
 }
 
+bool
+libelec_chgr_get_working(const elec_comp_t *chgr)
+{
+	ASSERT(chgr != NULL);
+	ASSERT(chgr->info != NULL);
+	ASSERT3U(chgr->info->type, ==, ELEC_TRU);
+	ASSERT(chgr->info->tru.charger);
+	ASSERT(chgr->tru.batt_conn != NULL);
+	return (chgr->ro.in_volts > 90 &&
+	    libelec_tie_get_all(chgr->tru.batt_conn));
+}
+
 double
 libelec_phys_get_batt_voltage(double U_nominal, double chg_rel, double I_rel)
 {

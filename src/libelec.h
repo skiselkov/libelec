@@ -224,6 +224,8 @@ bool libelec_tie_get_list_v(elec_comp_t *tie, bool exclusive, va_list ap);
 double libelec_batt_get_chg_rel(const elec_comp_t *batt);
 void libelec_batt_set_chg_rel(elec_comp_t *batt, double chg_rel);
 
+bool libelec_chgr_get_working(const elec_comp_t *chgr);
+
 double libelec_phys_get_chg_rel(double J_ideal, double T_batt);
 double libelec_phys_get_batt_voltage(double U_nominal, double chg_rel,
     double I_rel);
