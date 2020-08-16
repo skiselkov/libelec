@@ -372,6 +372,13 @@ libelec_vis_destroy(libelec_vis_t *vis)
 	free(vis);
 }
 
+void
+libelec_vis_set_offset(libelec_vis_t *vis, vect2_t offset)
+{
+	ASSERT(vis != NULL);
+	vis->offset = offset;
+}
+
 bool
 libelec_vis_is_open(libelec_vis_t *vis)
 {

@@ -31,6 +31,7 @@ libelec_vis_t *libelec_vis_new(elec_sys_t *sys, double pos_scale,
     double font_sz, mt_cairo_uploader_t *mtul);
 void libelec_vis_destroy(libelec_vis_t *vis);
 
+void libelec_vis_set_offset(libelec_vis_t *vis, vect2_t offset);
 bool libelec_vis_is_open(libelec_vis_t *vis);
 void libelec_vis_open(libelec_vis_t *vis);
 
