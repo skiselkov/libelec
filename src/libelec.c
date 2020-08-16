@@ -308,6 +308,8 @@ resolve_comp_links(elec_sys_t *sys)
 		    comp->info->tru.charger) {
 			comp->tru.batt = find_comp(sys,
 			    comp->info->tru.batt, comp);
+			comp->tru.batt_conn = find_comp(sys,
+			    comp->info->tru.batt_conn, comp);
 		}
 	}
 }
@@ -1215,7 +1217,7 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 		    info != NULL) {
 			info->gui.color = VECT3(atof(comps[1]),
 			    atof(comps[2]), atof(comps[3]));
-		} else if (strcmp(cmd, "CHGR_BATT") == 0 && n_comps == 3 &&
+		} else if (strcmp(cmd, "CHGR_BATT") == 0 && n_comps == 4 &&
 		    info != NULL && info->type == ELEC_TRU) {
 			info->tru.charger = true;
 			info->tru.batt =
@@ -1226,7 +1228,15 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 				free_strlist(comps, n_comps);
 				goto errout;
 			}
-			info->tru.curr_lim = atof(comps[2]);
+			info->tru.batt_conn =
+			    find_comp_info(infos, num_comps, comps[2]);
+			if (info->tru.batt_conn == NULL) {
+				logMsg("%s:%d: unknown component %s",
+				    filename, linenum, comps[1]);
+				free_strlist(comps, n_comps);
+				goto errout;
+			}
+			info->tru.curr_lim = atof(comps[3]);
 			if (info->tru.curr_lim <= 0) {
 				logMsg("%s:%d: current limit must be positive",
 				    filename, linenum);
@@ -1834,7 +1844,10 @@ network_update_tru(elec_comp_t *tru, double d_t)
 		double oc_ratio = tru->tru.prev_amps / tru->info->tru.curr_lim;
 		double regul_tgt = clamp(oc_ratio > 0 ?
 		    tru->tru.chgr_regul / oc_ratio : 1, 0, 1);
-		if (oc_ratio > 4) {
+		/*
+		 * Don't enable the output if the battery isn't being sensed.
+		 */
+		if (!libelec_tie_get_all(tru->tru.batt_conn) || oc_ratio > 4) {
 			/*
 			 * When a super-high current consumer is persistently
 			 * on, we might blow our output breaker by trying to

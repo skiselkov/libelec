@@ -90,6 +90,7 @@ typedef struct {
 	elec_comp_t	*ac;
 	elec_comp_t	*dc;
 	elec_comp_t	*batt;
+	elec_comp_t	*batt_conn;
 	double		prev_amps;
 	double		chgr_regul;
 	double		eff;

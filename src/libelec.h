@@ -78,6 +78,7 @@ typedef struct {
 	 */
 	bool		charger;
 	elec_comp_info_t *batt;
+	elec_comp_info_t *batt_conn;
 	double		curr_lim;	/* current limit - Amps */
 } elec_tru_info_t;
 
