@@ -1636,6 +1636,7 @@ static void
 network_reset(elec_sys_t *sys)
 {
 	ASSERT(sys != NULL);
+	ASSERT_MUTEX_HELD(&sys->worker_interlock);
 
 	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
 	    comp = list_next(&sys->comps, comp)) {
@@ -1869,6 +1870,7 @@ static void
 network_srcs_update(elec_sys_t *sys, double d_t)
 {
 	ASSERT(sys != NULL);
+	ASSERT_MUTEX_HELD(&sys->worker_interlock);
 	ASSERT3F(d_t, >, 0);
 
 	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
@@ -2177,6 +2179,7 @@ static void
 network_paint(elec_sys_t *sys)
 {
 	ASSERT(sys != NULL);
+	ASSERT_MUTEX_HELD(&sys->worker_interlock);
 
 	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
 	    comp = list_next(&sys->comps, comp)) {
@@ -2939,6 +2942,7 @@ comp_free(elec_comp_t *comp)
 	}
 	mutex_destroy(&comp->rw_ro_lock);
 
+	memset(comp, 0, sizeof (*comp));
 	free(comp);
 }
 
