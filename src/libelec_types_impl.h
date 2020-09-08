@@ -158,8 +158,9 @@ struct elec_comp_s {
 	 */
 	uint64_t		integ_mask;
 
-	SERIALIZE_START_MARKER;
 	mutex_t			rw_ro_lock;
+
+	SERIALIZE_START_MARKER;
 	struct {
 		double		in_volts;
 		double		out_volts;
