@@ -57,6 +57,7 @@ typedef struct elec_gen_info_s {
 	double	freq;		/* nominal frequency at operating rpm */
 	double	stab_rate_U;	/* stabilization adaptation rate (FILTER_IN) */
 	double	stab_rate_f;	/* stabilization adaptation rate (FILTER_IN) */
+	double	exc_rpm;	/* min rpm for generator field excitation */
 	double	min_rpm;	/* min rpm at which volts can be achieved */
 	double	max_rpm;	/* max rpm above which regulation fails */
 	double	max_pwr;	/* max power draw in Watts */

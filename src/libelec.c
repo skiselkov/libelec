@@ -1048,6 +1048,9 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 		    info != NULL && info->type == ELEC_GEN) {
 			ASSERT(info->gen.freq != 0);
 			info->gen.stab_rate_f = atof(comps[1]);
+		} else if (strcmp(cmd, "EXC_RPM") == 0 && n_comps == 2 &&
+		    info != NULL && info->type == ELEC_GEN) {
+			info->gen.exc_rpm = atof(comps[1]);
 		} else if (strcmp(cmd, "MIN_RPM") == 0 && n_comps == 2 &&
 		    info != NULL && info->type == ELEC_GEN) {
 			info->gen.min_rpm = atof(comps[1]);
@@ -1739,10 +1742,15 @@ network_update_gen(elec_comp_t *gen, double d_t)
 		gen->gen.stab_factor_f = 1;
 	}
 	if (!gen->rw.failed) {
-		gen->rw.in_volts = (rpm / gen->gen.ctr_rpm) *
-		    gen->gen.stab_factor_U * gen->info->gen.volts;
-		gen->rw.in_freq = (rpm / gen->gen.ctr_rpm) *
-		    gen->gen.stab_factor_f * gen->info->gen.freq;
+		if (rpm < gen->info->gen.exc_rpm) {
+			gen->rw.in_volts = 0;
+			gen->rw.in_freq = 0;
+		} else {
+			gen->rw.in_volts = (rpm / gen->gen.ctr_rpm) *
+			    gen->gen.stab_factor_U * gen->info->gen.volts;
+			gen->rw.in_freq = (rpm / gen->gen.ctr_rpm) *
+			    gen->gen.stab_factor_f * gen->info->gen.freq;
+		}
 		gen->rw.out_volts = gen->rw.in_volts;
 		gen->rw.out_freq = gen->rw.in_freq;
 	} else {
