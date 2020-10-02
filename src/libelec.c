@@ -1607,6 +1607,13 @@ libelec_comp_is_AC(const elec_comp_t *comp)
 	VERIFY_FAIL();
 }
 
+bool
+libelec_comp_is_powered(const elec_comp_t *comp)
+{
+	ASSERT(comp != NULL);
+	return (libelec_comp_get_out_volts(comp) != 0);
+}
+
 void
 libelec_comp_set_failed(elec_comp_t *comp, bool failed)
 {
@@ -2399,7 +2406,10 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 		 */
 		comp->rw.in_amps = load_Q / d_t;
 		comp->rw.out_amps = load_I;
-		comp->rw.out_volts = comp->load.incap_U;
+		if (comp->load.incap_U >= comp->info->load.min_volts)
+			comp->rw.out_volts = comp->load.incap_U;
+		else
+			comp->rw.out_volts = 0;
 		comp->load.incap_d_Q = -used_Q;
 	} else {
 		/*

@@ -201,6 +201,7 @@ double libelec_comp_get_incap_volts(const elec_comp_t *comp);
 
 bool libelec_comp_is_AC(const elec_comp_t *comp);
 
+bool libelec_comp_is_powered(const elec_comp_t *comp);
 void libelec_comp_set_failed(elec_comp_t *comp, bool failed);
 bool libelec_comp_get_failed(const elec_comp_t *comp);
 void libelec_comp_set_shorted(elec_comp_t *comp, bool shorted);
