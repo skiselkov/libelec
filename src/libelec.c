@@ -2378,7 +2378,7 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 	 * will be lower than the input voltage and so no more charge can
 	 * be drawn from it.
 	 */
-	if (comp->load.incap_U > comp->rw.in_volts && load_I > 0) {
+	if (comp->load.incap_U > comp->rw.in_volts) {
 		/* Amount of charge requested by the load in this time step */
 		double load_Q = load_I * d_t;
 		/* Amount of charge that can be drawn from the incap */
@@ -2399,16 +2399,7 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 		 */
 		comp->rw.in_amps = load_Q / d_t;
 		comp->rw.out_amps = load_I;
-		/*
-		 * The final voltage is a mixture of the network voltage
-		 * and incap voltage, in a ratio determined by how many
-		 * units of charge were provided from the incap (at the
-		 * the incap's voltage) vs how many came in from the
-		 * network (at the network's input voltage).
-		 */
-		ASSERT(used_Q + load_Q != 0);
-		comp->rw.out_volts = (comp->load.incap_U * used_Q +
-		    comp->rw.in_volts * load_Q) / (used_Q + load_Q);
+		comp->rw.out_volts = comp->load.incap_U;
 		comp->load.incap_d_Q = -used_Q;
 	} else {
 		/*
