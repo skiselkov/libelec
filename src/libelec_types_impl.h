@@ -59,6 +59,9 @@ struct elec_sys_s {
 
 	list_t		comps;
 	list_t		gens_batts;
+
+	const elec_comp_info_t	*comp_infos;	/* immutable */
+	size_t			num_infos;
 };
 
 typedef struct {

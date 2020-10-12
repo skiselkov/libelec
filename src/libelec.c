@@ -354,6 +354,8 @@ check_comp_links(elec_sys_t *sys)
 			CHECK_LINK(comp->diode.sides[0]);
 			CHECK_LINK(comp->diode.sides[1]);
 			break;
+		case ELEC_LABEL_BOX:
+			break;
 		}
 	}
 #undef	CHECK_LINK
@@ -464,6 +466,8 @@ libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 			ASSERT(comp->info->diode.sides[0] != NULL);
 			ASSERT(comp->info->diode.sides[1] != NULL);
 			break;
+		case ELEC_LABEL_BOX:
+			break;
 		}
 
 #ifdef	LIBELEC_WITH_DRS
@@ -494,6 +498,9 @@ libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 	VERIFY(XPLMRegisterDrawCallback(elec_draw_cb, xplm_Phase_Window,
 	    0, sys));
 #endif	/* defined(XPLANE) */
+
+	sys->comp_infos = comp_infos;
+	sys->num_infos = num_infos;
 
 	return (sys);
 }
@@ -892,7 +899,8 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 		    strncmp(line, "CB3 ", 4) == 0 ||
 		    strncmp(line, "SHUNT ", 6) == 0 ||
 		    strncmp(line, "TIE ", 4) == 0 ||
-		    strncmp(line, "DIODE ", 6) == 0) {
+		    strncmp(line, "DIODE ", 6) == 0 ||
+		    strncmp(line, "LABEL_BOX ", 10) == 0) {
 			num_comps++;
 		} else if (strncmp(line, "LOADCB ", 7) == 0 ||
 		    strncmp(line, "LOADCB3 ", 8) == 0) {
@@ -1007,6 +1015,20 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 			info = &infos[comp_i++];
 			info->type = ELEC_DIODE;
 			info->name = strdup(comps[1]);
+		} else if (strcmp(cmd, "LABEL_BOX") == 0 && n_comps >= 7) {
+			size_t sz = 0;
+			ASSERT3U(comp_i, <, num_comps);
+			info = &infos[comp_i++];
+			info->type = ELEC_LABEL_BOX;
+			info->label_box.pos =
+			    VECT2(atof(comps[1]), atof(comps[2]));
+			info->label_box.sz =
+			    VECT2(atof(comps[3]), atof(comps[4]));
+			info->label_box.font_scale = atof(comps[5]);
+			for (size_t i = 6; i < n_comps; i++) {
+				append_format(&info->name, &sz, "%s%s",
+				    comps[i], i + 1 < n_comps ? " " : "");
+			}
 		} else if (strcmp(cmd, "VOLTS") == 0 && n_comps == 2 &&
 		    info != NULL) {
 			if (info->type == ELEC_BATT)
@@ -1603,6 +1625,8 @@ libelec_comp_is_AC(const elec_comp_t *comp)
 		ASSERT(comp->tie.n_buses != 0);
 		ASSERT(comp->tie.buses[0] != NULL);
 		return (comp->tie.buses[0]->info->bus.ac);
+	case ELEC_LABEL_BOX:
+		VERIFY_FAIL();
 	}
 	VERIFY_FAIL();
 }
@@ -2169,6 +2193,8 @@ network_paint_src_comp(elec_comp_t *src, elec_comp_t *upstream,
 	case ELEC_DIODE:
 		network_paint_src_diode(src, upstream, comp, depth);
 		break;
+	case ELEC_LABEL_BOX:
+		VERIFY_FAIL();
 	}
 }
 
@@ -2623,6 +2649,8 @@ network_load_integrate_comp(const elec_comp_t *src,
 			ASSERT(!isnan(comp->rw.in_amps));
 		}
 		break;
+	case ELEC_LABEL_BOX:
+		VERIFY_FAIL();
 	}
 }
 

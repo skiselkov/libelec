@@ -39,7 +39,8 @@ typedef enum {
 	ELEC_CB,
 	ELEC_SHUNT,
 	ELEC_TIE,
-	ELEC_DIODE
+	ELEC_DIODE,
+	ELEC_LABEL_BOX
 } elec_comp_type_t;
 
 typedef struct {
@@ -118,6 +119,12 @@ typedef enum {
     GUI_LOAD_MOTOR
 } gui_load_type_t;
 
+typedef struct {
+	vect2_t			pos;
+	vect2_t			sz;
+	double			font_scale;
+} elec_label_box_info_t;
+
 struct elec_comp_info_s {
 	elec_comp_type_t		type;
 	char				*name;
@@ -132,6 +139,7 @@ struct elec_comp_info_s {
 		elec_bus_info_t		bus;
 		elec_cb_info_t		cb;
 		elec_diode_info_t	diode;
+		elec_label_box_info_t	label_box;
 	};
 	struct {
 		vect2_t			pos;

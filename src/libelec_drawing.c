@@ -671,6 +671,61 @@ draw_batt(cairo_t *cr, double pos_scale, const elec_comp_info_t *info,
 	    TEXT_ALIGN_RIGHT, "%s", info->name);
 }
 
+static void
+draw_label_box(cairo_t *cr, double pos_scale, double font_sz,
+    const elec_comp_info_t *info)
+{
+	cairo_text_extents_t te;
+	vect3_t color;
+	vect2_t pos, sz;
+	double dash[2] = { PX(1), PX(0.5) };
+
+	ASSERT(cr != NULL);
+	ASSERT(info != NULL);
+	ASSERT3U(info->type, ==, ELEC_LABEL_BOX);
+
+	cairo_save(cr);
+
+	cairo_set_font_size(cr, font_sz * info->label_box.font_scale);
+
+	cairo_text_extents(cr, info->name, &te);
+	pos = info->label_box.pos;
+	sz = info->label_box.sz;
+	color = info->gui.color;
+
+	cairo_set_dash(cr, dash, 2, 0);
+
+	cairo_set_source_rgb(cr, color.x, color.y, color.z);
+	cairo_rectangle(cr, PX(pos.x), PX(pos.y), PX(sz.x), PX(sz.y));
+	cairo_stroke(cr);
+
+	/*
+	 * We add half te.height to the width of the surrounding box to
+	 * add a bit of a border around the text.
+	 */
+	cairo_set_source_rgb(cr, 0, 0, 0);
+	cairo_set_dash(cr, NULL, 0, 0);
+	cairo_rectangle(cr, PX(pos.x + sz.x / 2) - te.width / 2 - te.height / 2,
+	    PX(pos.y) - te.height * 0.75, te.width + te.height,
+	    te.height * 1.5);
+	cairo_stroke(cr);
+	/*
+	 * White background
+	 */
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	cairo_rectangle(cr, PX(pos.x + sz.x / 2) - te.width / 2 - te.height / 2,
+	    PX(pos.y) - te.height * 0.75, te.width + te.height,
+	    te.height * 1.5);
+	cairo_fill(cr);
+
+	cairo_set_source_rgb(cr, 0, 0, 0);
+	cairo_move_to(cr, PX(pos.x + sz.x / 2) - te.width / 2,
+	    PX(pos.y) - te.height / 2 - te.y_bearing);
+	cairo_show_text(cr, info->name);
+
+	cairo_restore(cr);
+}
+
 void
 libelec_draw_layout(const elec_sys_t *sys, cairo_t *cr, double pos_scale,
     double font_sz)
@@ -728,9 +783,18 @@ libelec_draw_layout(const elec_sys_t *sys, cairo_t *cr, double pos_scale,
 		case ELEC_BATT:
 			draw_batt(cr, pos_scale, info, true);
 			break;
+		case ELEC_LABEL_BOX:
+			VERIFY_FAIL();
+			break;
 		default:
 			break;
 		}
+	}
+	for (size_t i = 0; i < sys->num_infos; i++) {
+		const elec_comp_info_t *info = &sys->comp_infos[i];
+
+		if (info->type == ELEC_LABEL_BOX)
+			draw_label_box(cr, pos_scale, font_sz, info);
 	}
 }
 
@@ -845,6 +909,8 @@ draw_comp_info(const elec_comp_t *comp, cairo_t *cr, double pos_scale,
 		pos.y += LINE_HEIGHT;
 		show_text_aligned(cr, PX(pos.x), PX(pos.y),
 		    TEXT_ALIGN_LEFT, "W: %.*fW", fixed_decimals(W_in, 4), W_in);
+		break;
+	case ELEC_LABEL_BOX:
 		break;
 	}
 }
@@ -1223,6 +1289,8 @@ libelec_draw_comp_info(const elec_comp_t *comp, cairo_t *cr,
 		break;
 	case ELEC_DIODE:
 		draw_diode_info(comp, cr, pos_scale, font_sz, pos);
+		break;
+	case ELEC_LABEL_BOX:
 		break;
 	}
 }
