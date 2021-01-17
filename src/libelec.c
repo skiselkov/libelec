@@ -400,6 +400,14 @@ libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 		    NULL, "Duplicate info name %s", info->name);
 		avl_insert(&sys->name2comp, comp, where);
 
+		/* Initialize component */
+		switch (comp->info->type) {
+		case ELEC_LOAD:
+			comp->load.random_load_factor = 1;
+			break;
+		default:
+			break;
+		}
 		/* Validate info structure */
 		switch (comp->info->type) {
 		case ELEC_BATT:
@@ -1925,6 +1933,22 @@ network_srcs_update(elec_sys_t *sys, double d_t)
 }
 
 static void
+network_loads_randomize(elec_sys_t *sys, double d_t)
+{
+	ASSERT(sys != NULL);
+	ASSERT3F(d_t, >, 0);
+
+	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
+	    comp = list_next(&sys->comps, comp)) {
+		if (comp->info->type == ELEC_LOAD) {
+			FILTER_IN(comp->load.random_load_factor,
+			    clamp(1.0 + crc64_rand_normal(0.1), 0.8, 1.2),
+			    d_t, 0.25);
+		}
+	}
+}
+
+static void
 load_incap_update(elec_comp_t *comp, double d_t)
 {
 	const elec_comp_info_t *info;
@@ -2312,6 +2336,7 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 	}
 	ASSERT3F(load_WorI, >=, 0);
 
+	load_WorI *= comp->load.random_load_factor;
 	/*
 	 * If the load use a stabilized power supply, the load value is
 	 * in Watts. Calculate the effective current.
@@ -2933,6 +2958,7 @@ elec_sys_worker(void *userinfo)
 
 	network_reset(sys);
 	network_srcs_update(sys, d_t);
+	network_loads_randomize(sys, d_t);
 	network_paint(sys);
 	network_load_integrate(sys, d_t);
 	network_loads_update(sys, d_t);

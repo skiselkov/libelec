@@ -104,6 +104,7 @@ typedef struct {
 	SERIALIZE_START_MARKER;
 	/* Virtual input capacitor voltage */
 	double		incap_U;
+	double		random_load_factor;
 	SERIALIZE_END_MARKER;
 	/* Change of input capacitor charge */
 	double		incap_d_Q;
