@@ -15,6 +15,7 @@
 #include <XPLMDisplay.h>
 
 #include <acfutils/helpers.h>
+#include <acfutils/widget.h>
 
 #include "libelec_types_impl.h"
 #include "libelec_drawing.h"
@@ -393,4 +394,5 @@ libelec_vis_open(libelec_vis_t *vis)
 	ASSERT(vis != NULL);
 	ASSERT(vis->win != NULL);
 	XPLMSetWindowIsVisible(vis->win, true);
+	window_follow_VR(vis->win);
 }
