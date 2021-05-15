@@ -3312,7 +3312,11 @@ libelec_phys_get_batt_voltage(double U_nominal, double chg_rel, double I_rel)
 	};
 	ASSERT3F(U_nominal, >, 0);
 	ASSERT3F(chg_rel, >=, 0);
-	ASSERT3F(chg_rel, <=, 1);
+	/*
+	 * Small numerical precision errors during a state restore can cause
+	 * this value to go slightly over '1'. Ignore those cases.
+	 */
+	ASSERT3F(chg_rel, <=, 1.0001);
 	I_rel = clamp(I_rel, 0, 1);
 	return (U_nominal * (1 - clamp(pow(I_rel, 1.45), 0, 1)) *
 	    fx_lin_multi(chg_rel, chg_volt_curve, true));
