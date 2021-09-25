@@ -1650,7 +1650,9 @@ void
 libelec_comp_set_failed(elec_comp_t *comp, bool failed)
 {
 	ASSERT(comp != NULL);
+	mutex_enter(&comp->rw_ro_lock);
 	comp->ro.failed = failed;
+	mutex_exit(&comp->rw_ro_lock);
 }
 
 bool
@@ -1664,7 +1666,9 @@ void
 libelec_comp_set_shorted(elec_comp_t *comp, bool shorted)
 {
 	ASSERT(comp != NULL);
+	mutex_enter(&comp->rw_ro_lock);
 	comp->ro.shorted = shorted;
+	mutex_exit(&comp->rw_ro_lock);
 }
 
 bool
@@ -1694,6 +1698,7 @@ network_reset(elec_sys_t *sys)
 		comp->rw.out_pwr = 0;
 		comp->rw.out_amps = 0;
 		comp->rw.out_freq = 0;
+		comp->rw.short_amps = 0;
 
 		mutex_enter(&comp->rw_ro_lock);
 		comp->rw.failed = comp->ro.failed;
@@ -2041,9 +2046,6 @@ network_paint_src_tie(elec_comp_t *src, elec_comp_t *upstream,
 	ASSERT(comp->info != NULL);
 	ASSERT3U(comp->info->type, ==, ELEC_TIE);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
-
-	if (comp->rw.failed)
-		return;
 
 	/* Check if the upstream bus is currently tied */
 	for (unsigned i = 0; i < comp->tie.n_buses; i++) {
@@ -2501,8 +2503,12 @@ network_load_integrate_bus(const elec_comp_t *src, elec_comp_t *comp,
 			amps += comp->bus.comps[i]->rw.in_amps;
 		}
 	}
+	/*
+	 * Assume short circuit resistance is 500mΩ.
+	 */
+	comp->rw.short_amps = (comp->rw.shorted ? comp->rw.in_volts / 0.5 : 0);
 	comp->rw.out_amps = amps;
-	comp->rw.in_amps = amps;
+	comp->rw.in_amps = amps + comp->rw.short_amps;
 }
 
 static void
@@ -2705,6 +2711,11 @@ network_state_xfer(elec_sys_t *sys)
 	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
 	    comp = list_next(&sys->comps, comp)) {
 		mutex_enter(&comp->rw_ro_lock);
+		/* Copy in caller-side settings that might have been changed */
+		if (comp->ro.failed != comp->rw.failed)
+			comp->rw.failed = comp->ro.failed;
+		if (comp->ro.shorted != comp->rw.shorted)
+			comp->rw.shorted = comp->ro.shorted;
 		comp->ro = comp->rw;
 		mutex_exit(&comp->rw_ro_lock);
 	}
@@ -2871,6 +2882,12 @@ network_trace(const elec_comp_t *upstream, const elec_comp_t *comp,
 static void
 network_integrity_check(elec_sys_t *sys)
 {
+	/*
+	 * E_out - the amount of energy exiting the network
+	 * E_in - the amount of energy entering the network
+	 * Loads (& shorted buses) only add to E_out. Generators
+	 * only add to E_in. TRUs and batteries add to both.
+	 */
 	double E_out = 0, E_in = 0;
 
 	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
@@ -2894,6 +2911,9 @@ network_integrity_check(elec_sys_t *sys)
 		} else if (comp->info->type == ELEC_BATT) {
 			E_in += comp->rw.out_volts * comp->rw.out_amps;
 			E_out += comp->rw.in_volts * comp->rw.in_amps;
+		} else if (comp->info->type == ELEC_BUS) {
+			/* A short circuit is a simple power consumer */
+			E_out += comp->rw.out_volts * comp->rw.short_amps;
 		}
 	}
 	if (ABS(E_out - E_in) >= 1e-3) {
@@ -2907,13 +2927,17 @@ network_integrity_check(elec_sys_t *sys)
 			}
 			for (elec_comp_t *load = list_head(&sys->comps);
 			    load != NULL; load = list_next(&sys->comps, load)) {
-				if (load->src != src ||
-				    (load->info->type != ELEC_LOAD &&
-				    load->info->type != ELEC_TRU &&
-				    load->info->type != ELEC_BATT)) {
+				if (load->src != src)
 					continue;
+				if (load->info->type == ELEC_LOAD ||
+				    load->info->type == ELEC_TRU ||
+				    load->info->type == ELEC_BATT) {
+					W_out += load->rw.in_volts *
+					    load->rw.in_amps;
+				} else if (load->info->type == ELEC_BUS) {
+					W_out += load->rw.in_volts *
+					    load->rw.short_amps;
 				}
-				W_out += load->rw.in_volts * load->rw.in_amps;
 			}
 			W_in = src->rw.out_volts * src->rw.out_amps;
 			if (ABS(W_out - W_in) > 1e-3) {
@@ -3053,6 +3077,10 @@ libelec_tie_set_info_list(elec_comp_t *comp,
 	ASSERT3U(comp->info->type, ==, ELEC_TIE);
 	ASSERT(bus_list != NULL || list_len == 0);
 
+	/* A failure of a tie means it gets stuck in its current position */
+	if (comp->ro.failed)
+		return;
+
 	if (list_len == 0) {
 		mutex_enter(&comp->tie.lock);
 		memset(comp->tie.cur_state, 0,
@@ -3108,6 +3136,9 @@ libelec_tie_set_v(elec_comp_t *comp, va_list ap)
 	ASSERT(comp->info != NULL);
 	ASSERT3U(comp->info->type, ==, ELEC_TIE);
 
+	if (comp->ro.failed)
+		return;
+
 	va_copy(ap2, ap);
 	for (len = 0; va_arg(ap2, elec_comp_t *) != NULL; len++)
 		;
@@ -3129,6 +3160,9 @@ libelec_tie_set_all(elec_comp_t *comp, bool tied)
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
 	ASSERT3U(comp->info->type, ==, ELEC_TIE);
+
+	if (comp->ro.failed)
+		return;
 
 	mutex_enter(&comp->tie.lock);
 	for (unsigned i = 0; i < comp->tie.n_buses; i++)

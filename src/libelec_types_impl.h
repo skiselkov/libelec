@@ -170,6 +170,7 @@ struct elec_comp_s {
 		double		out_volts;
 		double		in_amps;
 		double		out_amps;
+		double		short_amps;
 		double		in_pwr;		/* Watts */
 		double		out_pwr;	/* Watts */
 		double		in_freq;	/* Hz */
