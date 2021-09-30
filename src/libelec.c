@@ -2894,10 +2894,12 @@ network_integrity_check(elec_sys_t *sys)
 	    comp = list_next(&sys->comps, comp)) {
 		if (comp->info->type == ELEC_LOAD) {
 			if (comp->src != NULL) {
-				ASSERT3F(comp->rw.in_volts, ==,
-				    comp->src->rw.out_volts);
-				ASSERT3F(comp->rw.in_freq, ==,
-				    comp->src->rw.out_freq);
+				if (!comp->rw.failed) {
+					ASSERT3F(comp->rw.in_volts, ==,
+					    comp->src->rw.out_volts);
+					ASSERT3F(comp->rw.in_freq, ==,
+					    comp->src->rw.out_freq);
+				}
 			} else {
 				ASSERT0(comp->rw.in_volts);
 				ASSERT0(comp->rw.in_freq);
@@ -2986,8 +2988,12 @@ elec_sys_worker(void *userinfo)
 	network_paint(sys);
 	network_load_integrate(sys, d_t);
 	network_loads_update(sys, d_t);
-	network_state_xfer(sys);
 	network_integrity_check(sys);
+	/*
+	 * Must occur AFTER the integrity check! network_state_xfer touches
+	 * the rw state and syncs it to the ro state.
+	 */
+	network_state_xfer(sys);
 
 	mutex_enter(&sys->user_cbs_lock);
 	for (user_cb_info_t *ucbi = avl_first(&sys->user_cbs); ucbi != NULL;
