@@ -1,7 +1,7 @@
 /*
  * CONFIDENTIAL
  *
- * Copyright 2020 Saso Kiselkov. All rights reserved.
+ * Copyright 2021 Saso Kiselkov. All rights reserved.
  *
  * NOTICE:  All information contained herein is, and remains the property
  * of Saso Kiselkov. The intellectual and technical concepts contained
@@ -100,23 +100,25 @@ elec_draw_cb(XPLMDrawingPhase phase, int before, void *refcon)
 	    dr_geti(&sys->drs.paused) != 0 || time_factor == 0) {
 		mutex_enter(&sys->paused_lock);
 		sys->paused = true;
+		sys->time_factor = 0;
 		mutex_exit(&sys->paused_lock);
 		return (1);
 	}
-	sys->paused = false;
+	sys->prev_sim_time = sim_time;
 	/*
 	 * If the time factor returns to 1.0x, we want to make sure we
 	 * go back to 1.0x exactly, instead of some fractional 1.04x thing
 	 * in case the sim was only ever so slightly accelerated/decelerated.
 	 */
-	if (time_factor != sys->time_factor ||
-	    (time_factor == 1 && sys->time_factor != 1)) {
-		sys->time_factor = time_factor;
-		if (sys->started) {
-			worker_set_interval_nowake(&sys->worker,
-			    EXEC_INTVAL / time_factor);
-		}
+	if ((time_factor != sys->time_factor ||
+	    (time_factor == 1 && sys->time_factor != 1)) && sys->started) {
+		worker_set_interval_nowake(&sys->worker,
+		    EXEC_INTVAL / time_factor);
 	}
+	mutex_enter(&sys->paused_lock);
+	sys->paused = false;
+	sys->time_factor = time_factor;
+	mutex_exit(&sys->paused_lock);
 
 	return (1);
 }
@@ -1909,11 +1911,9 @@ network_update_tru(elec_comp_t *tru, double d_t)
 			 */
 			tru->tru.chgr_regul = 0;
 		} else if (regul_tgt > tru->tru.chgr_regul) {
-			FILTER_IN(tru->tru.chgr_regul, regul_tgt,
-			    USEC2SEC(EXEC_INTVAL), 1);
+			FILTER_IN(tru->tru.chgr_regul, regul_tgt, d_t, 1);
 		} else {
-			FILTER_IN(tru->tru.chgr_regul, regul_tgt,
-			    USEC2SEC(EXEC_INTVAL), 2 * USEC2SEC(EXEC_INTVAL));
+			FILTER_IN(tru->tru.chgr_regul, regul_tgt, d_t, 2 * d_t);
 		}
 	}
 }
@@ -2958,17 +2958,37 @@ static bool_t
 elec_sys_worker(void *userinfo)
 {
 	elec_sys_t *sys;
-	const double d_t = USEC2SEC(EXEC_INTVAL);
+	uint64_t now = microclock();
+	double d_t;
+#ifdef	LIBELEC_TIMING_DEBUG
+	static int steps = 0;
+	static double d_t_total = 0;
+	static uint64_t last_report = 0;
+#endif	/* defined(LIBELEC_TIMING_DEBUG) */
 
 	ASSERT(userinfo != NULL);
 	sys = userinfo;
 
 	mutex_enter(&sys->paused_lock);
-	if (sys->paused) {
+	if (sys->paused || sys->prev_clock == 0) {
 		mutex_exit(&sys->paused_lock);
+		sys->prev_clock = now;
 		return (B_TRUE);
 	}
+	d_t = USEC2SEC(now - sys->prev_clock) * sys->time_factor;
+	sys->prev_clock = now;
 	mutex_exit(&sys->paused_lock);
+
+#ifdef	LIBELEC_TIMING_DEBUG
+	steps++;
+	d_t_total += d_t;
+	if (now - last_report > SEC2USEC(1)) {
+		logMsg("steps: %4d  d_t_avg: %f", steps, d_t_total / steps);
+		steps = 0;
+		d_t_total = 0;
+		last_report = now;
+	}
+#endif	/* defined(LIBELEC_TIMING_DEBUG) */
 
 	mutex_enter(&sys->worker_interlock);
 

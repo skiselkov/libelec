@@ -1,7 +1,7 @@
 /*
  * CONFIDENTIAL
  *
- * Copyright 2020 Saso Kiselkov. All rights reserved.
+ * Copyright 2021 Saso Kiselkov. All rights reserved.
  *
  * NOTICE:  All information contained herein is, and remains the property
  * of Saso Kiselkov. The intellectual and technical concepts contained
@@ -41,6 +41,7 @@ struct elec_sys_s {
 	mutex_t		paused_lock;
 	bool		paused;		/* protected by paused_lock */
 	double		time_factor;	/* only accessed from main thread */
+	uint64_t	prev_clock;
 #ifdef	XPLANE
 	double		prev_sim_time;
 	struct {
