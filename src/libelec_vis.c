@@ -21,7 +21,8 @@
 #include "libelec_drawing.h"
 #include "libelec_vis.h"
 
-#define	WIN_SZ		600
+#define	WIN_WIDTH	900
+#define	WIN_HEIGHT	600
 #define	WIN_FPS		20
 #define	WIN_FPS_FAST	30
 
@@ -329,8 +330,8 @@ libelec_vis_new(elec_sys_t *sys, double pos_scale, double font_sz,
 	XPLMCreateWindow_t cr = {
 	    .structSize = sizeof (cr),
 	    .left = 100,
-	    .top = 100 + WIN_SZ,
-	    .right = 100 + WIN_SZ,
+	    .top = 100 + WIN_HEIGHT,
+	    .right = 100 + WIN_WIDTH,
 	    .bottom = 100,
 	    .handleMouseClickFunc = win_click,
 	    .handleMouseWheelFunc = win_wheel,
@@ -354,6 +355,7 @@ libelec_vis_new(elec_sys_t *sys, double pos_scale, double font_sz,
 
 	XPLMSetWindowTitle(vis->win, "Electrical Network");
 	XPLMSetWindowResizingLimits(vis->win, 200, 200, 100000, 100000);
+	classic_win_center(vis->win);
 
 	recreate_mtcr(vis);
 
