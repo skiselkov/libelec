@@ -1681,10 +1681,36 @@ libelec_comp_get_shorted(const elec_comp_t *comp)
 }
 
 static void
-network_reset(elec_sys_t *sys)
+update_short_leak_factor(elec_comp_t *comp, double d_t)
+{
+	ASSERT(comp != NULL);
+	ASSERT3F(d_t, >, 0);
+
+	if (comp->rw.shorted) {
+		/*
+		 * Gradually ramp up the leak to give the breaker a bit of
+		 * time to stay pushed in.
+		 */
+		if (comp->info->type == ELEC_LOAD) {
+			if (comp->ro.in_pwr != 0)
+				FILTER_IN(comp->rw.leak_factor, 0.99, d_t, 1);
+			else
+				comp->rw.leak_factor = 0;
+		} else {
+			comp->rw.leak_factor =
+			    wavg(0.9, 0.99, crc64_rand_fract());
+		}
+	} else {
+		comp->rw.leak_factor = 0;
+	}
+}
+
+static void
+network_reset(elec_sys_t *sys, double d_t)
 {
 	ASSERT(sys != NULL);
 	ASSERT_MUTEX_HELD(&sys->worker_interlock);
+	ASSERT3F(d_t, >, 0);
 
 	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
 	    comp = list_next(&sys->comps, comp)) {
@@ -1705,12 +1731,7 @@ network_reset(elec_sys_t *sys)
 		mutex_enter(&comp->rw_ro_lock);
 		comp->rw.failed = comp->ro.failed;
 		comp->rw.shorted = comp->ro.shorted;
-		if (comp->rw.shorted) {
-			comp->rw.leak_factor = wavg(0.9, 0.999,
-			    crc64_rand_fract());
-		} else {
-			comp->rw.leak_factor = 0;
-		}
+		update_short_leak_factor(comp, d_t);
 		mutex_exit(&comp->rw_ro_lock);
 
 		comp->integ_mask = 0;
@@ -1860,6 +1881,7 @@ network_update_cb(elec_comp_t *cb, double d_t)
 	/* 3-phase CBs evenly split the power between themselves */
 	if (cb->info->cb.triphase)
 		amps_rat /= 3;
+	amps_rat = MIN(amps_rat, 5 * cb->info->cb.rate);
 	FILTER_IN(cb->scb.temp, amps_rat, d_t, cb->info->cb.rate);
 
 	if (cb->scb.temp >= 1.0) {
@@ -2352,10 +2374,10 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 	}
 	if (comp->rw.shorted) {
 		/*
-		 * Shorted components randomly consume 10-100x their
-		 * nominal power.
+		 * Shorted components boost their current draw.
 		 */
-		load_I *= wavg(10, 100, crc64_rand_fract());
+		ASSERT3F(comp->rw.leak_factor, <, 1);
+		load_I /= (1 - comp->rw.leak_factor);
 	} else if (comp->rw.failed) {
 		/*
 		 * Failed components just drop their power consumption to zero
@@ -3002,7 +3024,7 @@ elec_sys_worker(void *userinfo)
 	}
 	mutex_exit(&sys->user_cbs_lock);
 
-	network_reset(sys);
+	network_reset(sys, d_t);
 	network_srcs_update(sys, d_t);
 	network_loads_randomize(sys, d_t);
 	network_paint(sys);
