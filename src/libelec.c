@@ -42,6 +42,7 @@
 
 #define	EXEC_INTVAL		40000	/* us */
 #define	MAX_NETWORK_DEPTH	100	/* dimensionless */
+#define	NO_NEG_ZERO(x)		((x) == 0.0 ? 0.0 : (x))
 
 typedef struct {
 	bool		pre;
@@ -66,11 +67,10 @@ static bool_t elec_sys_worker(void *userinfo);
 static void comp_free(elec_comp_t *comp);
 static void network_paint_src_comp(elec_comp_t *src, elec_comp_t *upstream,
     elec_comp_t *comp, unsigned depth);
-static void network_load_integrate_comp(const elec_comp_t *src,
-    const elec_comp_t *upstream, elec_comp_t *comp, unsigned depth,
-    uint64_t src_mask, double d_t);
-static void network_load_integrate_load(elec_comp_t *comp, unsigned depth,
-    double d_t);
+static double network_load_integrate_comp(const elec_comp_t *src,
+    const elec_comp_t *upstream, elec_comp_t *comp, unsigned depth, double d_t);
+static double network_load_integrate_load(const elec_comp_t *src,
+    elec_comp_t *comp, unsigned depth, double d_t);
 
 static double network_trace(const elec_comp_t *upstream,
     const elec_comp_t *comp, unsigned depth, bool do_print);
@@ -130,6 +130,48 @@ gen_is_AC(const elec_comp_info_t *info)
 	ASSERT(info != NULL);
 	ASSERT3U(info->type, ==, ELEC_GEN);
 	return (info->gen.freq != 0);
+}
+
+static bool
+check_upstream(const elec_comp_t *comp, const elec_comp_t *src,
+    const elec_comp_t *upstream)
+{
+	ASSERT(comp != NULL);
+	ASSERT(src != NULL);
+	ASSERT3U(src->src_idx, <, MAX_SRCS);
+	ASSERT(upstream != NULL);
+
+	for (unsigned i = 0; i < comp->n_links; i++) {
+		if (comp->links[i].comp == upstream)
+			return (comp->links[i].srcs[src->src_idx] == src);
+	}
+	return (false);
+}
+
+static double
+get_src_fract(const elec_comp_t *comp, const elec_comp_t *src)
+{
+	ASSERT(comp != NULL);
+	ASSERT(src != NULL);
+
+	if (comp->src_int_cond_total > 1e-12) {
+		double src_cond = (1.0 / src->info->int_R) * src->rw.out_volts;
+		return (MIN(src_cond / comp->src_int_cond_total, 1));
+	} else {
+		return (1);
+	}
+}
+
+static double
+sum_link_amps(const elec_link_t *link)
+{
+	double amps = 0;
+
+	ASSERT(link != NULL);
+	for (unsigned i = 0; i < MAX_SRCS; i++)
+		amps += link->out_amps[i];
+
+	return (amps);
 }
 
 static int
@@ -201,40 +243,39 @@ resolve_bus_links(elec_sys_t *sys, elec_comp_t *bus)
 	ASSERT3U(bus->info->type, ==, ELEC_BUS);
 
 	for (int i = 0; bus->info->bus.comps[i] != NULL; i++)
-		bus->bus.n_comps++;
-	bus->bus.comps = safe_calloc(bus->bus.n_comps,
-	    sizeof (*bus->bus.comps));
+		bus->n_links++;
+	bus->links = safe_calloc(bus->n_links, sizeof (*bus->links));
 
 	for (int i = 0; bus->info->bus.comps[i] != NULL; i++) {
 		elec_comp_t *comp = find_comp(sys, bus->info->bus.comps[i],
 		    bus);
 
-		bus->bus.comps[i] = comp;
+		bus->links[i].comp = comp;
 		ASSERT(comp->info != NULL);
 		switch (comp->info->type) {
 		case ELEC_BATT:
 			/* Batteries are DC-only devices! */
 			ASSERT(!bus->info->bus.ac);
-			comp->batt.bus = bus;
+			comp->links[0].comp = bus;
 			break;
 		case ELEC_GEN:
 			/* Generators can be DC or AC */
 			ASSERT3U(bus->info->bus.ac, ==, gen_is_AC(comp->info));
-			comp->gen.bus = bus;
+			comp->links[0].comp = bus;
 			break;
 		case ELEC_TRU:
 			if (comp->info->tru.ac == bus->info) {
 				ASSERT(bus->info->bus.ac);
-				comp->tru.ac = bus;
+				comp->links[0].comp = bus;
 			} else {
 				ASSERT3P(comp->info->tru.dc, ==, bus->info);
 				ASSERT(!bus->info->bus.ac);
-				comp->tru.dc = bus;
+				comp->links[1].comp = bus;
 			}
 			break;
 		case ELEC_LOAD:
 			ASSERT3U(bus->info->bus.ac, ==, comp->info->load.ac);
-			comp->load.bus = bus;
+			comp->links[0].comp = bus;
 			break;
 		case ELEC_BUS:
 			VERIFY_MSG(0, "Invalid link: cannot connect bus %s "
@@ -244,17 +285,16 @@ resolve_bus_links(elec_sys_t *sys, elec_comp_t *bus)
 		case ELEC_CB:
 		case ELEC_SHUNT:
 			/* 3-phase breakers are only allowed on AC buses */
-			ASSERT(!comp->info->cb.triphase ||
-			    bus->info->bus.ac);
-			if (comp->scb.sides[0] == NULL) {
-				comp->scb.sides[0] = bus;
+			ASSERT(!comp->info->cb.triphase || bus->info->bus.ac);
+			if (comp->links[0].comp == NULL) {
+				comp->links[0].comp = bus;
 			} else {
-				elec_comp_t *other_bus = comp->scb.sides[0];
+				elec_comp_t *other_bus = comp->links[0].comp;
 
-				ASSERT_MSG(comp->scb.sides[1] == NULL,
+				ASSERT_MSG(comp->links[1].comp == NULL,
 				    "Too many connections to %s",
 				    comp->info->name);
-				comp->scb.sides[1] = bus;
+				comp->links[1].comp = bus;
 				ASSERT_MSG(bus->info->bus.ac ==
 				    other_bus->info->bus.ac, "%s is linking "
 				    "two buses of incompatible type (%s is "
@@ -266,15 +306,15 @@ resolve_bus_links(elec_sys_t *sys, elec_comp_t *bus)
 			}
 			break;
 		case ELEC_TIE:
-			comp->tie.n_buses++;
-			comp->tie.buses = safe_realloc(comp->tie.buses,
-			    comp->tie.n_buses * sizeof (*comp->tie.buses));
-			comp->tie.buses[comp->tie.n_buses - 1] = bus;
+			comp->n_links++;
+			comp->links = safe_realloc(comp->links,
+			    comp->n_links * sizeof (*comp->links));
+			comp->links[comp->n_links - 1].comp = bus;
 			free(comp->tie.cur_state);
-			comp->tie.cur_state = safe_calloc(comp->tie.n_buses,
+			comp->tie.cur_state = safe_calloc(comp->n_links,
 			    sizeof (*comp->tie.cur_state));
 			free(comp->tie.wk_state);
-			comp->tie.wk_state = safe_calloc(comp->tie.n_buses,
+			comp->tie.wk_state = safe_calloc(comp->n_links,
 			    sizeof (*comp->tie.wk_state));
 			break;
 		case ELEC_DIODE:
@@ -284,11 +324,11 @@ resolve_bus_links(elec_sys_t *sys, elec_comp_t *bus)
 			 */
 			ASSERT(!bus->info->bus.ac);
 			if (comp->info->diode.sides[0] == bus->info) {
-				comp->diode.sides[0] = bus;
+				comp->links[0].comp = bus;
 			} else {
 				ASSERT3P(comp->info->diode.sides[1], ==,
 				    bus->info);
-				comp->diode.sides[1] = bus;
+				comp->links[1].comp = bus;
 			}
 			break;
 		default:
@@ -327,38 +367,8 @@ check_comp_links(elec_sys_t *sys)
 	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
 	    comp = list_next(&sys->comps, comp)) {
 		ASSERT(comp->info != NULL);
-		switch (comp->info->type) {
-		case ELEC_BATT:
-			CHECK_LINK(comp->batt.bus);
-			break;
-		case ELEC_GEN:
-			CHECK_LINK(comp->gen.bus);
-			break;
-		case ELEC_TRU:
-			CHECK_LINK(comp->tru.ac);
-			CHECK_LINK(comp->tru.dc);
-			break;
-		case ELEC_LOAD:
-			CHECK_LINK(comp->load.bus);
-			break;
-		case ELEC_BUS:
-			CHECK_LINK(comp->bus.comps);
-			break;
-		case ELEC_CB:
-		case ELEC_SHUNT:
-			CHECK_LINK(comp->scb.sides[0]);
-			CHECK_LINK(comp->scb.sides[1]);
-			break;
-		case ELEC_TIE:
-			CHECK_LINK(comp->tie.buses);
-			break;
-		case ELEC_DIODE:
-			CHECK_LINK(comp->diode.sides[0]);
-			CHECK_LINK(comp->diode.sides[1]);
-			break;
-		case ELEC_LABEL_BOX:
-			break;
-		}
+		for (unsigned i = 0; i < comp->n_links; i++)
+			CHECK_LINK(comp->links[i].comp);
 	}
 #undef	CHECK_LINK
 }
@@ -367,12 +377,17 @@ elec_sys_t *
 libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 {
 	elec_sys_t *sys = safe_calloc(1, sizeof (*sys));
+	unsigned src_i = 0;
 
 	ASSERT(comp_infos != NULL);
 	ASSERT3U(num_infos, >, 0);
 
 	list_create(&sys->comps, sizeof (elec_comp_t),
 	    offsetof(elec_comp_t, comps_node));
+	list_create(&sys->gens_batts, sizeof (elec_comp_t),
+	    offsetof(elec_comp_t, gens_batts_node));
+	list_create(&sys->ties, sizeof (elec_comp_t),
+	    offsetof(elec_comp_t, ties_node));
 	avl_create(&sys->info2comp, info2comp_compar, sizeof (elec_comp_t),
 	    offsetof(elec_comp_t, info2comp_node));
 	avl_create(&sys->name2comp, name2comp_compar, sizeof (elec_comp_t),
@@ -403,9 +418,34 @@ libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 		avl_insert(&sys->name2comp, comp, where);
 
 		/* Initialize component */
-		switch (comp->info->type) {
-		case ELEC_LOAD:
+		if (comp->info->type == ELEC_LOAD) {
 			comp->load.random_load_factor = 1;
+		} else if (comp->info->type == ELEC_BATT ||
+		    comp->info->type == ELEC_GEN ||
+		    comp->info->type == ELEC_TRU) {
+			comp->src_idx = src_i;
+			src_i++;
+		}
+		if (comp->info->type == ELEC_BATT ||
+		    comp->info->type == ELEC_GEN) {
+			list_insert_tail(&sys->gens_batts, comp);
+		} else if (comp->info->type == ELEC_TIE) {
+			list_insert_tail(&sys->ties, comp);
+		}
+		/* Initialize links */
+		switch (comp->info->type) {
+		case ELEC_BATT:
+		case ELEC_GEN:
+		case ELEC_LOAD:
+			comp->n_links = 1;
+			comp->links = safe_calloc(1, sizeof (*comp->links));
+			break;
+		case ELEC_TRU:
+		case ELEC_CB:
+		case ELEC_SHUNT:
+		case ELEC_DIODE:
+			comp->n_links = 2;
+			comp->links = safe_calloc(2, sizeof (*comp->links));
 			break;
 		default:
 			break;
@@ -576,7 +616,7 @@ elec_comp_serialize(elec_comp_t *comp, conf_t *ser, const char *prefix)
 	case ELEC_TIE:
 		mutex_enter(&comp->tie.lock);
 		conf_set_data_v(ser, "%s/%s/cur_state", comp->tie.cur_state,
-		    comp->tie.n_buses * sizeof (*comp->tie.cur_state),
+		    comp->n_links * sizeof (*comp->tie.cur_state),
 		    prefix, comp->info->name);
 		mutex_exit(&comp->tie.lock);
 		break;
@@ -620,9 +660,9 @@ elec_comp_deserialize(elec_comp_t *comp, const conf_t *ser, const char *prefix)
 	case ELEC_TIE:
 		mutex_enter(&comp->tie.lock);
 		if (conf_get_data_v(ser, "%s/%s/cur_state", comp->tie.cur_state,
-		    comp->tie.n_buses * sizeof (*comp->tie.cur_state),
+		    comp->n_links * sizeof (*comp->tie.cur_state),
 		    prefix, comp->info->name) !=
-		    comp->tie.n_buses * sizeof (*comp->tie.cur_state)) {
+		    comp->n_links * sizeof (*comp->tie.cur_state)) {
 			mutex_exit(&comp->tie.lock);
 			return (false);
 		}
@@ -703,6 +743,14 @@ libelec_destroy(elec_sys_t *sys)
 	while (avl_destroy_nodes(&sys->name2comp, &cookie) != NULL)
 		;
 	avl_destroy(&sys->info2comp);
+
+	while (list_remove_head(&sys->gens_batts) != NULL)
+		;
+	list_destroy(&sys->gens_batts);
+
+	while (list_remove_head(&sys->ties) != NULL)
+		;
+	list_destroy(&sys->ties);
 
 	while ((comp = list_remove_head(&sys->comps)) != NULL)
 		comp_free(comp);
@@ -965,6 +1013,7 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 			info = &infos[comp_i++];
 			info->type = ELEC_BATT;
 			info->name = strdup(comps[1]);
+			info->int_R = 1;
 		} else if (strcmp(cmd, "GEN") == 0 && n_comps == 3) {
 			ASSERT3U(comp_i, <, num_comps);
 			CHECK_DUP_NAME(comps[1]);
@@ -972,12 +1021,14 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 			info->type = ELEC_GEN;
 			info->name = strdup(comps[1]);
 			info->gen.freq = atof(comps[2]);
+			info->int_R = 1;
 		} else if (strcmp(cmd, "TRU") == 0 && n_comps == 2) {
 			ASSERT3U(comp_i, <, num_comps);
 			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
 			info->type = ELEC_TRU;
 			info->name = strdup(comps[1]);
+			info->int_R = 1;
 		} else if (strcmp(cmd, "LOAD") == 0 &&
 		    (n_comps == 2 || n_comps == 3)) {
 			ASSERT3U(comp_i, <, num_comps);
@@ -1282,7 +1333,17 @@ libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
 		    info != NULL && info->type == ELEC_BATT) {
 			info->batt.chg_R = atof(comps[1]);
 			if (info->batt.chg_R <= 0) {
-				logMsg("%s:%d: current resistance must be "
+				logMsg("%s:%d: charge resistance must be "
+				    "positive", filename, linenum);
+				free_strlist(comps, n_comps);
+				goto errout;
+			}
+		} else if (strcmp(cmd, "INT_R") == 0 && n_comps == 2 &&
+		    info != NULL && (info->type == ELEC_BATT ||
+		    info->type == ELEC_GEN || info->type == ELEC_TRU)) {
+			info->int_R = atof(comps[1]);
+			if (info->int_R <= 0) {
+				logMsg("%s:%d: internal resistance must be "
 				    "positive", filename, linenum);
 				free_strlist(comps, n_comps);
 				goto errout;
@@ -1436,9 +1497,9 @@ libelec_comp_get_num_conns(const elec_comp_t *comp)
 	/* Electrical configuration is immutable, no need to lock */
 	switch (comp->info->type) {
 	case ELEC_BUS:
-		return (comp->bus.n_comps);
+		return (comp->n_links);
 	case ELEC_TIE:
-		return (comp->tie.n_buses);
+		return (comp->n_links);
 	case ELEC_TRU:
 	case ELEC_CB:
 	case ELEC_SHUNT:
@@ -1454,37 +1515,9 @@ libelec_comp_get_conn(const elec_comp_t *comp, size_t i)
 {
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
-
+	ASSERT3U(i, <, comp->n_links);
 	/* Electrical configuration is immutable, no need to lock */
-	switch (comp->info->type) {
-	case ELEC_BATT:
-		ASSERT0(i);
-		return (comp->batt.bus);
-	case ELEC_GEN:
-		ASSERT0(i);
-		return (comp->gen.bus);
-	case ELEC_TRU:
-		ASSERT3U(i, <, 2);
-		if (i == 0)
-			return (comp->tru.ac);
-		else
-			return (comp->tru.dc);
-	case ELEC_LOAD:
-		ASSERT0(i);
-		return (comp->load.bus);
-	case ELEC_BUS:
-		ASSERT3U(i, <, comp->bus.n_comps);
-		return (comp->bus.comps[i]);
-	case ELEC_CB:
-	case ELEC_SHUNT:
-		ASSERT3U(i, <, 2);
-		return (comp->scb.sides[i]);
-	case ELEC_DIODE:
-		ASSERT3U(i, <, 2);
-		return (comp->scb.sides[i]);
-	default:
-		VERIFY(0);
-	}
+	return (comp->links[i].comp);
 }
 
 double
@@ -1622,19 +1655,19 @@ libelec_comp_is_AC(const elec_comp_t *comp)
 	case ELEC_GEN:
 		return (comp->info->gen.freq != 0);
 	case ELEC_LOAD:
-		ASSERT(comp->load.bus != NULL);
-		return (comp->load.bus->info->bus.ac);
+		ASSERT(comp->links[0].comp != NULL);
+		return (comp->links[0].comp->info->bus.ac);
 	case ELEC_BUS:
 		return (comp->info->bus.ac);
 	case ELEC_CB:
 	case ELEC_SHUNT:
-		ASSERT(comp->scb.sides[0] != 0);
-		return (comp->scb.sides[0]->info->bus.ac);
+		ASSERT(comp->links[0].comp != 0);
+		return (comp->links[0].comp->info->bus.ac);
 		break;
 	case ELEC_TIE:
-		ASSERT(comp->tie.n_buses != 0);
-		ASSERT(comp->tie.buses[0] != NULL);
-		return (comp->tie.buses[0]->info->bus.ac);
+		ASSERT(comp->n_links != 0);
+		ASSERT(comp->links[0].comp != NULL);
+		return (comp->links[0].comp->info->bus.ac);
 	case ELEC_LABEL_BOX:
 		VERIFY_FAIL();
 	}
@@ -1714,9 +1747,9 @@ network_reset(elec_sys_t *sys, double d_t)
 
 	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
 	    comp = list_next(&sys->comps, comp)) {
-		comp->upstream = NULL;
-		comp->src_vis = comp->src;
-		comp->src = NULL;
+		elec_comp_t *srcs_vis[MAX_SRCS];
+
+		memcpy(srcs_vis, comp->srcs, sizeof (srcs_vis));
 
 		comp->rw.in_volts = 0;
 		comp->rw.in_pwr = 0;
@@ -1727,11 +1760,19 @@ network_reset(elec_sys_t *sys, double d_t)
 		comp->rw.out_amps = 0;
 		comp->rw.out_freq = 0;
 		comp->rw.short_amps = 0;
+		comp->src_int_cond_total = 0;
+		memset(comp->srcs, 0, sizeof (comp->srcs));
+		comp->n_srcs = 0;
+		for (unsigned i = 0; i < comp->n_links; i++) {
+			memset(comp->links[i].out_amps, 0,
+			    sizeof (comp->links[i].out_amps));
+		}
 
 		mutex_enter(&comp->rw_ro_lock);
 		comp->rw.failed = comp->ro.failed;
 		comp->rw.shorted = comp->ro.shorted;
 		update_short_leak_factor(comp, d_t);
+		memcpy(comp->srcs_vis, srcs_vis, sizeof (comp->srcs_vis));
 		mutex_exit(&comp->rw_ro_lock);
 
 		comp->integ_mask = 0;
@@ -1743,7 +1784,7 @@ network_reset(elec_sys_t *sys, double d_t)
 			/* Transfer the latest tie state to the worker set */
 			mutex_enter(&comp->tie.lock);
 			memcpy(comp->tie.wk_state, comp->tie.cur_state,
-			    comp->tie.n_buses * sizeof (*comp->tie.wk_state));
+			    comp->n_links * sizeof (*comp->tie.wk_state));
 			mutex_exit(&comp->tie.lock);
 			break;
 		case ELEC_CB:
@@ -2016,7 +2057,7 @@ network_loads_update(elec_sys_t *sys, double d_t)
 			 * care of input capacitance.
 			 */
 			if (!comp->load.seen)
-				network_load_integrate_load(comp, 0, d_t);
+				network_load_integrate_load(NULL, comp, 0, d_t);
 			load_incap_update(comp, d_t);
 		}
 
@@ -2026,32 +2067,80 @@ network_loads_update(elec_sys_t *sys, double d_t)
 }
 
 static void
+network_ties_update(elec_sys_t *sys)
+{
+	ASSERT(sys != NULL);
+
+	for (elec_comp_t *comp = list_head(&sys->ties); comp != NULL;
+	    comp = list_next(&sys->ties, comp)) {
+		unsigned n_tied = 0;
+		int tied[2] = { -1, -1 };
+		for (unsigned i = 0; i < comp->n_links; i++) {
+			if (comp->tie.wk_state[i]) {
+				tied[n_tied] = i;
+				n_tied++;
+				if (n_tied == ARRAY_NUM_ELEM(tied))
+					break;
+			}
+		}
+		if (n_tied == 2) {
+			double amps[2] = {
+			    sum_link_amps(&comp->links[tied[0]]),
+			    sum_link_amps(&comp->links[tied[1]])
+			};
+			comp->rw.out_amps = amps[0] - amps[1];
+			comp->rw.out_amps = NO_NEG_ZERO(ABS(comp->rw.out_amps));
+			comp->rw.in_amps = comp->rw.out_amps;
+		}
+	}
+}
+
+static inline void
+add_src_up(elec_comp_t *comp, elec_comp_t *src, const elec_comp_t *upstream)
+{
+	ASSERT(comp != NULL);
+	ASSERT(src != NULL);
+	ASSERT(upstream != NULL);
+
+	ASSERT0(src->src_mask & (1 << src->src_idx));
+	ASSERT3U(comp->n_srcs, <, MAX_SRCS);
+	comp->srcs[comp->n_srcs] = src;
+	comp->n_srcs++;
+	ASSERT3F(src->info->int_R, >, 0);
+	comp->src_int_cond_total += (1.0 / src->info->int_R) *
+	    src->rw.out_volts;
+	for (unsigned i = 0; i < comp->n_links; i++) {
+		if (comp->links[i].comp == upstream) {
+			comp->links[i].srcs[src->src_idx] = src;
+			return;
+		}
+	}
+	VERIFY_FAIL();
+}
+
+static void
 network_paint_src_bus(elec_comp_t *src, elec_comp_t *upstream,
     elec_comp_t *comp, unsigned depth)
 {
 	ASSERT(src != NULL);
 	ASSERT(upstream != NULL);
 	ASSERT(comp != NULL);
-	ASSERT(comp->info != NULL);
-	ASSERT3U(comp->info->type, ==, ELEC_BUS);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
 	if (comp->rw.failed)
 		return;
 
+	add_src_up(comp, src, upstream);
 	if (comp->rw.in_volts < src->rw.out_volts) {
-		comp->src = src;
-		comp->upstream = upstream;
 		comp->rw.in_volts = src->rw.out_volts;
 		comp->rw.in_freq = src->rw.out_freq;
 		comp->rw.out_volts = comp->rw.in_volts;
 		comp->rw.out_freq = comp->rw.in_freq;
-
-		for (unsigned i = 0; i < comp->bus.n_comps; i++) {
-			if (upstream != comp->bus.comps[i]) {
-				network_paint_src_comp(src, comp,
-				    comp->bus.comps[i], depth + 1);
-			}
+	}
+	for (unsigned i = 0; i < comp->n_links; i++) {
+		if (comp->links[i].comp != upstream) {
+			network_paint_src_comp(src, comp,
+			    comp->links[i].comp, depth + 1);
 		}
 	}
 }
@@ -2070,12 +2159,11 @@ network_paint_src_tie(elec_comp_t *src, elec_comp_t *upstream,
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
 	/* Check if the upstream bus is currently tied */
-	for (unsigned i = 0; i < comp->tie.n_buses; i++) {
-		if (upstream == comp->tie.buses[i]) {
+	for (unsigned i = 0; i < comp->n_links; i++) {
+		if (upstream == comp->links[i].comp) {
 			if (comp->tie.wk_state[i]) {
+				add_src_up(comp, src, upstream);
 				if (comp->rw.in_volts < src->rw.out_volts) {
-					comp->src = src;
-					comp->upstream = upstream;
 					comp->rw.in_volts = src->rw.out_volts;
 					comp->rw.in_freq = src->rw.out_freq;
 				}
@@ -2087,11 +2175,11 @@ network_paint_src_tie(elec_comp_t *src, elec_comp_t *upstream,
 	}
 	ASSERT(found);
 	if (tied) {
-		for (unsigned i = 0; i < comp->tie.n_buses; i++) {
-			if (upstream != comp->tie.buses[i] &&
+		for (unsigned i = 0; i < comp->n_links; i++) {
+			if (upstream != comp->links[i].comp &&
 			    comp->tie.wk_state[i]) {
 				network_paint_src_comp(src, comp,
-				    comp->tie.buses[i], depth + 1);
+				    comp->links[i].comp, depth + 1);
 			}
 		}
 	}
@@ -2109,25 +2197,32 @@ network_paint_src_tru(elec_comp_t *src, elec_comp_t *upstream,
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
 	/* Output rectification prevents back-flow of power from DC to AC */
-	if (upstream == comp->tru.ac && comp->rw.in_volts < src->rw.out_volts) {
-		comp->src = src;
-		comp->upstream = upstream;
+	if (upstream == comp->links[0].comp) {
+		add_src_up(comp, src, upstream);
+		ASSERT_MSG(comp->n_srcs == 1, "%s attempted to add a second "
+		    "AC power source ([0]=%s, [1]=%s). Multi-source feeding "
+		    "is NOT supported in AC networks.", comp->info->name,
+		    comp->srcs[0]->info->name, comp->srcs[1]->info->name);
 		if (!comp->rw.failed) {
-			comp->rw.in_volts = src->rw.out_volts;
-			comp->rw.in_freq = src->rw.out_freq;
-			comp->rw.out_volts = comp->tru.chgr_regul *
-			    comp->info->tru.out_volts *
-			    (comp->rw.in_volts / comp->info->tru.in_volts);
+			if (comp->rw.in_volts < src->rw.out_volts) {
+				comp->rw.in_volts = src->rw.out_volts;
+				comp->rw.in_freq = src->rw.out_freq;
+				comp->rw.out_volts = comp->tru.chgr_regul *
+				    comp->info->tru.out_volts *
+				    (comp->rw.in_volts /
+				    comp->info->tru.in_volts);
+			}
 		} else {
 			comp->rw.in_volts = 0;
 			comp->rw.in_freq = 0;
 			comp->rw.out_volts = 0;
 		}
-		ASSERT(comp->tru.dc != NULL);
+		ASSERT(comp->links[1].comp != NULL);
 		/*
 		 * The TRU becomes the source for downstream buses.
 		 */
-		network_paint_src_comp(comp, comp, comp->tru.dc, depth + 1);
+		network_paint_src_comp(comp, comp, comp->links[1].comp,
+		    depth + 1);
 	}
 }
 
@@ -2138,27 +2233,25 @@ network_paint_src_scb(elec_comp_t *src, elec_comp_t *upstream,
 	ASSERT(src != NULL);
 	ASSERT(upstream != NULL);
 	ASSERT(comp != NULL);
-	ASSERT(comp->info != NULL);
-	ASSERT(comp->info->type == ELEC_CB || comp->info->type == ELEC_SHUNT);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
-	if (!comp->rw.failed && comp->scb.wk_set &&
-	    comp->rw.in_volts < src->rw.out_volts) {
-		comp->src = src;
-		comp->upstream = upstream;
-		comp->rw.in_volts = src->rw.out_volts;
-		comp->rw.in_freq = src->rw.out_freq;
-		comp->rw.out_volts = src->rw.out_volts;
-		comp->rw.out_freq = src->rw.out_freq;
-		if (upstream == comp->scb.sides[0]) {
-			ASSERT(comp->scb.sides[1] != NULL);
-			network_paint_src_comp(src, comp, comp->scb.sides[1],
-			    depth + 1);
+	if (!comp->rw.failed && comp->scb.wk_set) {
+		add_src_up(comp, src, upstream);
+		if (comp->rw.in_volts < src->rw.out_volts) {
+			comp->rw.in_volts = src->rw.out_volts;
+			comp->rw.in_freq = src->rw.out_freq;
+			comp->rw.out_volts = src->rw.out_volts;
+			comp->rw.out_freq = src->rw.out_freq;
+		}
+		if (upstream == comp->links[0].comp) {
+			ASSERT(comp->links[1].comp != NULL);
+			network_paint_src_comp(src, comp,
+			    comp->links[1].comp, depth + 1);
 		} else {
-			ASSERT3P(upstream, ==, comp->scb.sides[1]);
-			ASSERT(comp->scb.sides[0] != NULL);
-			network_paint_src_comp(src, comp, comp->scb.sides[0],
-			    depth + 1);
+			ASSERT3P(upstream, ==, comp->links[1].comp);
+			ASSERT(comp->links[0].comp != NULL);
+			network_paint_src_comp(src, comp,
+			    comp->links[0].comp, depth + 1);
 		}
 	}
 }
@@ -2170,20 +2263,18 @@ network_paint_src_diode(elec_comp_t *src, elec_comp_t *upstream,
 	ASSERT(src != NULL);
 	ASSERT(upstream != NULL);
 	ASSERT(comp != NULL);
-	ASSERT(comp->info != NULL);
-	ASSERT3U(comp->info->type, ==, ELEC_DIODE);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
-	if (upstream == comp->diode.sides[0] &&
-	    comp->rw.in_volts < src->rw.out_volts) {
-		comp->src = src;
-		comp->upstream = upstream;
+	if (upstream == comp->links[0].comp) {
+		add_src_up(comp, src, upstream);
 		ASSERT0(src->rw.out_freq);
-		if (!comp->rw.failed)
-			comp->rw.in_volts = src->rw.out_volts;
-		else
+		if (!comp->rw.failed) {
+			if (comp->rw.in_volts < src->rw.out_volts)
+				comp->rw.in_volts = src->rw.out_volts;
+		} else {
 			comp->rw.in_volts = 0;
-		network_paint_src_comp(src, comp, comp->diode.sides[1],
+		}
+		network_paint_src_comp(src, comp, comp->links[1].comp,
 		    depth + 1);
 	}
 }
@@ -2196,39 +2287,37 @@ network_paint_src_comp(elec_comp_t *src, elec_comp_t *upstream,
 	ASSERT(src->info != NULL);
 	ASSERT(upstream != NULL);
 	ASSERT(comp != NULL);
-	ASSERT(comp->info != NULL);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
 	switch (comp->info->type) {
 	case ELEC_BATT:
-		if (src != comp && comp->rw.out_volts < src->rw.out_volts) {
-			comp->src = src;
-			comp->upstream = upstream;
-		}
+		if (src != comp && comp->rw.out_volts < src->rw.out_volts)
+			add_src_up(comp, src, upstream);
 		break;
 	case ELEC_GEN:
 		break;
 	case ELEC_BUS:
-		if (src->info->type == ELEC_BATT || src->info->type == ELEC_TRU)
+		if (src->info->type == ELEC_BATT ||
+		    src->info->type == ELEC_TRU) {
 			ASSERT(!comp->info->bus.ac);
-		else
+		} else {
 			ASSERT3U(gen_is_AC(src->info), ==, comp->info->bus.ac);
+		}
 		network_paint_src_bus(src, upstream, comp, depth);
 		break;
 	case ELEC_TRU:
 		network_paint_src_tru(src, upstream, comp, depth);
 		break;
 	case ELEC_LOAD:
-		if (comp->rw.in_volts < src->rw.out_volts) {
-			comp->src = src;
-			comp->upstream = upstream;
-			if (!comp->rw.failed) {
+		add_src_up(comp, src, upstream);
+		if (!comp->rw.failed) {
+			if (comp->rw.in_volts < src->rw.out_volts) {
 				comp->rw.in_volts = src->rw.out_volts;
 				comp->rw.in_freq = src->rw.out_freq;
-			} else {
-				comp->rw.in_volts = 0;
-				comp->rw.in_freq = 0;
 			}
+		} else {
+			comp->rw.in_volts = 0;
+			comp->rw.in_freq = 0;
 		}
 		break;
 	case ELEC_CB:
@@ -2247,107 +2336,81 @@ network_paint_src_comp(elec_comp_t *src, elec_comp_t *upstream,
 }
 
 static void
-network_paint_src(elec_sys_t *sys, elec_comp_t *comp)
-{
-	elec_comp_t *bus;
-
-	ASSERT(sys != NULL);
-	ASSERT(comp != NULL);
-	ASSERT(comp->info != NULL);
-	ASSERT(comp->info->type == ELEC_BATT || comp->info->type == ELEC_GEN);
-
-	if (comp->info->type == ELEC_BATT)
-		bus = comp->batt.bus;
-	else
-		bus = comp->gen.bus;
-	ASSERT(bus != NULL);
-	network_paint_src_comp(comp, comp, bus, 0);
-}
-
-static void
 network_paint(elec_sys_t *sys)
 {
 	ASSERT(sys != NULL);
 	ASSERT_MUTEX_HELD(&sys->worker_interlock);
 
-	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
-	    comp = list_next(&sys->comps, comp)) {
+	for (elec_comp_t *comp = list_head(&sys->gens_batts); comp != NULL;
+	    comp = list_next(&sys->gens_batts, comp)) {
 		ASSERT(comp->info != NULL);
 		if ((comp->info->type == ELEC_BATT ||
 		    comp->info->type == ELEC_GEN) && comp->rw.out_volts != 0) {
-			network_paint_src(sys, comp);
+			network_paint_src_comp(comp, comp,
+			    comp->links[0].comp, 0);
 		}
 	}
 }
 
-static void
-network_load_integrate_tru(elec_comp_t *comp, unsigned depth,
-    uint64_t src_mask, double d_t)
+static double
+network_load_integrate_tru(const elec_comp_t *src, const elec_comp_t *upstream,
+    elec_comp_t *comp, unsigned depth, double d_t)
 {
+	ASSERT(src != NULL);
+	ASSERT(upstream != NULL);
 	ASSERT(comp != NULL);
-	ASSERT(comp->tru.ac != NULL);
-	ASSERT(comp->tru.dc != NULL);
+	ASSERT(comp->links[0].comp != NULL);
+	ASSERT(comp->links[1].comp != NULL);
 	ASSERT(comp->info != NULL);
 	ASSERT3U(comp->info->type, ==, ELEC_TRU);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
-	if (comp->tru.dc->upstream != comp) {
-		/*
-		 * Don't forget to reset prev_amps - this resets the current
-		 * regulator circuit of chargers to prevent stopping to
-		 * charge if for some reason our output voltage drops below
-		 * the associated battery voltage.
-		 */
-		comp->tru.prev_amps = 0;
-		comp->rw.in_amps = 0;
-		comp->rw.out_amps = 0;
-		return;
-	}
+	if (upstream != comp->links[0].comp)
+		return (0);
 
 	/* When hopping over to the DC network, the TRU becomes the src */
-	network_load_integrate_comp(comp, comp, comp->tru.dc, depth + 1,
-	    src_mask, d_t);
-
+	comp->rw.out_amps = network_load_integrate_comp(
+	    comp, comp, comp->links[1].comp, depth + 1, d_t);
 	if (comp->rw.failed || comp->rw.in_volts == 0) {
 		comp->tru.prev_amps = 0;
 		comp->rw.in_amps = 0;
 		comp->rw.out_amps = 0;
-		return;
+		return (0);
 	}
-	comp->rw.out_amps = comp->tru.dc->rw.in_amps;
 	/*
 	 * Stash the amps value so we can use it to update voltage regulation
 	 * on battery chargers.
 	 */
 	comp->tru.prev_amps = comp->rw.out_amps;
-	comp->tru.eff = fx_lin_multi(comp->rw.out_amps,
+	comp->tru.eff = fx_lin_multi(comp->rw.out_volts * comp->rw.out_amps,
 	    comp->info->tru.eff_curve, true);
 	ASSERT3F(comp->tru.eff, >=, 0);
 	ASSERT3F(comp->tru.eff, <, 1);
 	comp->rw.in_amps = ((comp->rw.out_volts / comp->rw.in_volts) *
 	    comp->rw.out_amps) / comp->tru.eff;
-	ASSERT(comp->tru.ac != NULL);
+
+	return (comp->rw.in_amps);
 }
 
-static void
-network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
+static double
+network_load_integrate_load(const elec_comp_t *src, elec_comp_t *comp,
+    unsigned depth, double d_t)
 {
-	double load_WorI, load_I, in_volts_net, incap_I;
+	double load_WorI, load_I, in_volts_net, incap_I, src_fract;
 	const elec_comp_info_t *info;
 
+	/* src can be NULL */
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
 	ASSERT3U(comp->info->type, ==, ELEC_LOAD);
 	UNUSED(depth);
 
 	info = comp->info;
-
 	/*
 	 * If the input voltage is lower than our input capacitance voltage,
 	 * it will be our input capacitance powering the load, not the input.
 	 */
 	in_volts_net = MAX(comp->rw.in_volts, comp->load.incap_U);
-
 	/*
 	 * Only ask the load if we are receiving sufficient volts.
 	 */
@@ -2384,7 +2447,6 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 		 */
 		load_I = 0;
 	}
-
 	/*
 	 * When the input voltage is greater than the input capacitance
 	 * voltage, we will be charging up the input capacitance.
@@ -2441,7 +2503,6 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 	} else {
 		incap_I = 0;
 	}
-
 	/*
 	 * If the input capacitance has a greater voltage than the network
 	 * input voltage, then we need to calculate how much of the charge
@@ -2468,13 +2529,11 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 		    info->load.incap_C;
 		/* Amount of charge actually drawn from the incap */
 		double used_Q = MIN(load_Q, avail_Q);
-
 		/*
 		 * Subtract the charge provided by the incap from the
 		 * network-demanded charge.
 		 */
 		load_Q -= used_Q;
-
 		/*
 		 * Actual network current is the delta vs what the incap
 		 * can provide.
@@ -2500,13 +2559,22 @@ network_load_integrate_load(elec_comp_t *comp, unsigned depth, double d_t)
 	ASSERT(!isnan(comp->rw.out_amps));
 	ASSERT(!isnan(comp->rw.out_volts));
 	comp->load.seen = true;
+	if (src != NULL) {
+		src_fract = get_src_fract(comp, src);
+		comp->links[0].out_amps[src->src_idx] =
+		    NO_NEG_ZERO(-comp->rw.in_amps * src_fract);
+	} else {
+		src_fract = 1;
+	}
+
+	return (comp->rw.in_amps * src_fract);
 }
 
-static void
-network_load_integrate_bus(const elec_comp_t *src, elec_comp_t *comp,
-    unsigned depth, uint64_t src_mask, double d_t)
+static double
+network_load_integrate_bus(const elec_comp_t *src, const elec_comp_t *upstream,
+    elec_comp_t *comp, unsigned depth, double d_t)
 {
-	double amps = 0;
+	double out_amps_total = 0;
 
 	ASSERT(src != NULL);
 	ASSERT(comp != NULL);
@@ -2514,30 +2582,24 @@ network_load_integrate_bus(const elec_comp_t *src, elec_comp_t *comp,
 	ASSERT3U(comp->info->type, ==, ELEC_BUS);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
-	for (unsigned i = 0; i < comp->bus.n_comps; i++) {
-		ASSERT(comp->bus.comps[i] != NULL);
-		if (comp->bus.comps[i] != comp->upstream &&
-		    comp->bus.comps[i]->upstream == comp &&
-		    comp->bus.comps[i]->src == src) {
-			network_load_integrate_comp(src, comp,
-			    comp->bus.comps[i], depth + 1, src_mask, d_t);
-			ASSERT(!isnan(comp->bus.comps[i]->rw.in_amps));
-			amps += comp->bus.comps[i]->rw.in_amps;
+	for (unsigned i = 0; i < comp->n_links; i++) {
+		ASSERT(comp->links[i].comp != NULL);
+		if (comp->links[i].comp != upstream) {
+			comp->links[i].out_amps[src->src_idx] =
+			    network_load_integrate_comp(src, comp,
+			    comp->links[i].comp, depth + 1, d_t);
+			ASSERT3F(comp->links[i].out_amps[src->src_idx], >=, 0);
+			out_amps_total += comp->links[i].out_amps[src->src_idx];
 		}
 	}
-	/*
-	 * Assume short circuit resistance is 500mΩ.
-	 */
-	comp->rw.short_amps = (comp->rw.shorted ? comp->rw.in_volts / 0.5 : 0);
-	comp->rw.out_amps = amps;
-	comp->rw.in_amps = amps + comp->rw.short_amps;
+	return (out_amps_total);
 }
 
-static void
-network_load_integrate_tie(const elec_comp_t *src, elec_comp_t *comp,
-    unsigned depth, uint64_t src_mask, double d_t)
+static double
+network_load_integrate_tie(const elec_comp_t *src, const elec_comp_t *upstream,
+    elec_comp_t *comp, unsigned depth, double d_t)
 {
-	double amps = 0;
+	double out_amps_total = 0;
 
 	ASSERT(src != NULL);
 	ASSERT(comp != NULL);
@@ -2545,60 +2607,63 @@ network_load_integrate_tie(const elec_comp_t *src, elec_comp_t *comp,
 	ASSERT3U(comp->info->type, ==, ELEC_TIE);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
-	for (unsigned i = 0; i < comp->tie.n_buses; i++) {
-		ASSERT(comp->tie.buses[i] != NULL);
-		if (comp->tie.buses[i] == comp->upstream)
-			ASSERT(comp->tie.wk_state[i]);
-		if (comp->tie.wk_state[i] &&
-		    comp->tie.buses[i] != comp->upstream &&
-		    comp->tie.buses[i]->upstream == comp) {
-			network_load_integrate_comp(src, comp,
-			    comp->tie.buses[i], depth + 1, src_mask, d_t);
-			ASSERT(!isnan(comp->tie.buses[i]->rw.in_amps));
-			amps += comp->tie.buses[i]->rw.in_amps;
+	for (unsigned i = 0; i < comp->n_links; i++) {
+		ASSERT(comp->links[i].comp != NULL);
+		if (comp->links[i].comp == upstream && !comp->tie.wk_state[i])
+			return (0);
+	}
+	for (unsigned i = 0; i < comp->n_links; i++) {
+		ASSERT(comp->links[i].comp != NULL);
+		if (comp->tie.wk_state[i] && comp->links[i].comp != upstream) {
+			comp->links[i].out_amps[src->src_idx] =
+			    network_load_integrate_comp(src, comp,
+			    comp->links[i].comp, depth + 1, d_t);
+			ASSERT3F(comp->links[i].out_amps[src->src_idx], >=, 0);
+			out_amps_total += comp->links[i].out_amps[src->src_idx];
 		}
 	}
-
-	comp->rw.out_amps = amps;
-	comp->rw.in_amps = amps;
+	return (out_amps_total);
 }
 
-static void
-network_load_integrate_scb(const elec_comp_t *src, elec_comp_t *comp,
-    unsigned depth, uint64_t src_mask, double d_t)
+static double
+network_load_integrate_scb(const elec_comp_t *src, const elec_comp_t *upstream,
+    elec_comp_t *comp, unsigned depth, double d_t)
 {
 	ASSERT(src != NULL);
+	ASSERT(upstream != NULL);
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
 	ASSERT(comp->info->type == ELEC_CB || comp->info->type == ELEC_SHUNT);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
 
 	if (!comp->scb.wk_set)
-		return;
-	if (comp->upstream == comp->scb.sides[0]) {
-		network_load_integrate_comp(src, comp,
-		    comp->scb.sides[1], depth + 1, src_mask, d_t);
-		comp->rw.out_amps = comp->scb.sides[1]->rw.in_amps;
-	} else {
-		ASSERT3P(comp->upstream, ==, comp->scb.sides[1]);
-		network_load_integrate_comp(src, comp,
-		    comp->scb.sides[0], depth + 1, src_mask, d_t);
-		comp->rw.out_amps = comp->scb.sides[0]->rw.in_amps;
+		return (0);
+	for (unsigned i = 0; i < 2; i++) {
+		if (comp->links[i].comp == upstream) {
+			comp->links[!i].out_amps[src->src_idx] =
+			    network_load_integrate_comp(src, comp,
+			    comp->links[!i].comp, depth + 1, d_t);
+			comp->rw.out_amps = sum_link_amps(&comp->links[0]) -
+			    sum_link_amps(&comp->links[1]);
+			comp->rw.out_amps = NO_NEG_ZERO(ABS(comp->rw.out_amps));
+			comp->rw.in_amps = comp->rw.out_amps;
+
+			return (comp->links[!i].out_amps[src->src_idx]);
+		}
 	}
-	ASSERT(!isnan(comp->rw.in_amps));
-	comp->rw.in_amps = comp->rw.out_amps;
+	VERIFY_FAIL();
 }
 
-static void
-network_load_integrate_batt(const elec_comp_t *src, elec_comp_t *batt,
-    unsigned depth, uint64_t src_mask, double d_t)
+static double
+network_load_integrate_batt(const elec_comp_t *src,
+    const elec_comp_t *upstream, elec_comp_t *batt, unsigned depth, double d_t)
 {
 	ASSERT(src != NULL);
 	ASSERT(batt != NULL);
 	ASSERT(batt->info != NULL);
 	ASSERT3U(batt->info->type, ==, ELEC_BATT);
 
-	if (src != batt && batt->src == src) {
+	if (depth != 0 && check_upstream(batt, src, upstream)) {
 		double U_delta = MAX(src->rw.out_volts - batt->rw.out_volts, 0);
 
 		ASSERT0(src->rw.out_freq);
@@ -2616,41 +2681,65 @@ network_load_integrate_batt(const elec_comp_t *src, elec_comp_t *batt,
 			    batt->rw.in_amps;
 		}
 		batt->rw.out_amps = 0;
-	} else if (src == batt) {
-		if (batt->batt.bus->src == batt) {
-			network_load_integrate_comp(batt, batt, batt->batt.bus,
-			    depth + 1, src_mask, d_t);
-			batt->rw.out_amps = batt->batt.bus->rw.in_amps;
-		}
+
+		return (batt->rw.in_amps);
+	} else if (depth == 0) {
+		batt->rw.out_amps = network_load_integrate_comp(batt, batt,
+		    batt->links[0].comp, depth + 1, d_t);
+		batt->batt.prev_amps = batt->rw.out_amps;
+
+		return (batt->rw.out_amps);
+	} else {
+		return (0);
 	}
-	batt->batt.prev_amps = batt->rw.out_amps;
 }
 
-static void
-network_load_integrate_gen(elec_comp_t *gen, unsigned depth,
-    uint64_t src_mask, double d_t)
+static double
+network_load_integrate_gen(elec_comp_t *gen, unsigned depth, double d_t)
 {
+	double out_pwr;
+
 	ASSERT(gen != NULL);
 	ASSERT(gen->info != NULL);
 	ASSERT3U(gen->info->type, ==, ELEC_GEN);
 
-	if (gen->gen.bus->src != gen)
-		return;
+	if (depth != 0)
+		return (0);
 
-	network_load_integrate_comp(gen, gen, gen->gen.bus, depth + 1,
-	    src_mask, d_t);
-	gen->rw.out_amps = gen->gen.bus->rw.in_amps;
+	gen->rw.out_amps = network_load_integrate_comp(gen, gen,
+	    gen->links[0].comp, depth + 1, d_t);
 	gen->rw.in_volts = gen->rw.out_volts;
 	gen->rw.in_freq = gen->rw.out_freq;
-	gen->gen.eff = fx_lin_multi(gen->rw.in_volts * gen->rw.out_amps,
-	    gen->info->gen.eff_curve, true);
+	out_pwr = gen->rw.in_volts * gen->rw.out_amps;
+	gen->gen.eff = fx_lin_multi(out_pwr, gen->info->gen.eff_curve, true);
 	gen->rw.in_amps = gen->rw.out_amps / gen->gen.eff;
+
+	return (gen->rw.out_amps);
 }
 
-static void
+static double
+network_load_integrate_diode(const elec_comp_t *src,
+    const elec_comp_t *upstream, elec_comp_t *comp, unsigned depth, double d_t)
+{
+	ASSERT(src != NULL);
+	ASSERT(upstream != NULL);
+	ASSERT(comp != NULL);
+	ASSERT3P(upstream, ==, comp->links[0].comp);
+	ASSERT3F(d_t, >, 0);
+	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
+
+	comp->links[1].out_amps[src->src_idx] = network_load_integrate_comp(
+	    src, comp, comp->links[1].comp, depth + 1, d_t);
+	comp->rw.out_amps = sum_link_amps(&comp->links[1]);
+	comp->rw.in_amps = comp->rw.out_amps;
+	ASSERT(!isnan(comp->rw.in_amps));
+
+	return (comp->links[1].out_amps[src->src_idx]);
+}
+
+static double
 network_load_integrate_comp(const elec_comp_t *src,
-    const elec_comp_t *upstream, elec_comp_t *comp, unsigned depth,
-    uint64_t src_mask, double d_t)
+    const elec_comp_t *upstream, elec_comp_t *comp, unsigned depth, double d_t)
 {
 	ASSERT(src != NULL);
 	ASSERT(src->info != NULL);
@@ -2659,71 +2748,52 @@ network_load_integrate_comp(const elec_comp_t *src,
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
+	ASSERT3F(d_t, >, 0);
 
-	if (src == comp)
-		ASSERT0(depth);
-	if (comp != src && (comp->src != src || upstream != comp->upstream))
-		return;
-
-	ASSERT0(comp->integ_mask & src_mask);
-	comp->integ_mask |= src_mask;
+	if (comp != src && !check_upstream(comp, src, upstream))
+		return (0);
 
 	switch (comp->info->type) {
 	case ELEC_BATT:
-		network_load_integrate_batt(src, comp, depth, src_mask, d_t);
-		break;
+		return (network_load_integrate_batt(src, upstream, comp,
+		    depth, d_t));
 	case ELEC_GEN:
-		network_load_integrate_gen(comp, depth, src_mask, d_t);
-		break;
+		return (network_load_integrate_gen(comp, depth, d_t));
 	case ELEC_TRU:
-		ASSERT3P(upstream, ==, comp->tru.ac);
-		network_load_integrate_tru(comp, depth, src_mask, d_t);
-		break;
+		ASSERT3P(upstream, ==, comp->links[0].comp);
+		return (network_load_integrate_tru(src, upstream, comp,
+		    depth, d_t));
 	case ELEC_LOAD:
-		network_load_integrate_load(comp, depth, d_t);
-		break;
+		return (network_load_integrate_load(src, comp, depth, d_t));
 	case ELEC_BUS:
-		network_load_integrate_bus(src, comp, depth, src_mask, d_t);
-		break;
+		return (network_load_integrate_bus(src, upstream, comp,
+		    depth, d_t));
 	case ELEC_CB:
 	case ELEC_SHUNT:
-		network_load_integrate_scb(src, comp, depth, src_mask, d_t);
-		break;
+		return (network_load_integrate_scb(src, upstream, comp,
+		    depth, d_t));
 	case ELEC_TIE:
-		network_load_integrate_tie(src, comp, depth, src_mask, d_t);
-		break;
+		return (network_load_integrate_tie(src, upstream, comp,
+		    depth, d_t));
 	case ELEC_DIODE:
-		ASSERT3P(upstream, ==, comp->diode.sides[0]);
-		if (comp->diode.sides[1]->upstream == comp) {
-			network_load_integrate_comp(src, comp,
-			    comp->diode.sides[1], depth + 1, src_mask, d_t);
-			comp->rw.out_amps = comp->diode.sides[1]->rw.in_amps;
-			comp->rw.in_amps = comp->rw.out_amps;
-			ASSERT(!isnan(comp->rw.in_amps));
-		}
-		break;
+		return (network_load_integrate_diode(src, upstream, comp,
+		    depth, d_t));
 	case ELEC_LABEL_BOX:
 		VERIFY_FAIL();
 	}
+	VERIFY_FAIL();
 }
 
 static void
 network_load_integrate(elec_sys_t *sys, double d_t)
 {
-	int src_i = 0;
-
 	ASSERT(sys != NULL);
+	ASSERT3F(d_t, >, 0);
 
-	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
-	    comp = list_next(&sys->comps, comp)) {
-		ASSERT(comp->info != NULL);
-		if (comp->info->type == ELEC_BATT ||
-		    comp->info->type == ELEC_GEN) {
-			ASSERT3U(src_i, <, 64);
-			network_load_integrate_comp(comp, comp, comp, 0,
-			    (uint64_t)1 << src_i, d_t);
-			src_i++;
-		}
+	for (elec_comp_t *comp = list_head(&sys->gens_batts); comp != NULL;
+	    comp = list_next(&sys->gens_batts, comp)) {
+		comp->rw.out_amps = network_load_integrate_comp(comp, comp,
+		    comp, 0, d_t);
 	}
 }
 
@@ -2783,11 +2853,11 @@ network_trace_scb(const elec_comp_t *upstream, const elec_comp_t *comp,
 
 	if (!comp->scb.wk_set)
 		return (0);
-	if (upstream == comp->scb.sides[0]) {
-		return (network_trace(comp, comp->scb.sides[1],
+	if (upstream == comp->links[0].comp) {
+		return (network_trace(comp, comp->links[1].comp,
 		    depth + 1, do_print));
 	} else {
-		return (network_trace(comp, comp->scb.sides[0],
+		return (network_trace(comp, comp->links[0].comp,
 		    depth + 1, do_print));
 	}
 }
@@ -2801,12 +2871,9 @@ network_trace(const elec_comp_t *upstream, const elec_comp_t *comp,
 	ASSERT(upstream != NULL);
 	ASSERT(comp != NULL);
 
-	if (upstream != comp && comp->upstream != upstream)
-		return (0);
-
 	switch (comp->info->type) {
 	case ELEC_BATT:
-		load_trace = network_trace(comp, comp->batt.bus, depth + 1,
+		load_trace = network_trace(comp, comp->links[0].comp, depth + 1,
 		    false);
 		load_trace += comp->rw.out_volts * comp->rw.in_amps;
 		if (do_print) {
@@ -2816,15 +2883,17 @@ network_trace(const elec_comp_t *upstream, const elec_comp_t *comp,
 				print_trace_data(comp, depth, false,
 				    load_trace);
 			}
-			network_trace(comp, comp->batt.bus, depth + 1, true);
+			network_trace(comp, comp->links[0].comp, depth + 1,
+			    true);
 		}
 		break;
 	case ELEC_GEN:
-		load_trace = network_trace(comp, comp->gen.bus, depth + 1,
-		    false);
+		load_trace = network_trace(comp, comp->links[0].comp,
+		    depth + 1, false);
 		if (do_print) {
 			print_trace_data(comp, depth, true, load_trace);
-			network_trace(comp, comp->gen.bus, depth + 1, true);
+			network_trace(comp, comp->links[0].comp, depth + 1,
+			    true);
 		}
 		break;
 	case ELEC_TRU:
@@ -2833,12 +2902,12 @@ network_trace(const elec_comp_t *upstream, const elec_comp_t *comp,
 				print_trace_data(comp, depth, false, 0);
 			return (comp->rw.in_volts * comp->rw.in_amps);
 		} else {
-			load_trace = network_trace(comp, comp->tru.dc,
-			    depth + 1, false);
+			load_trace = network_trace(comp,
+			    comp->links[0].comp, depth + 1, false);
 			if (do_print) {
 				print_trace_data(comp, depth, true, load_trace);
-				network_trace(comp, comp->tru.dc, depth + 1,
-				    true);
+				network_trace(comp, comp->links[0].comp,
+				    depth + 1, true);
 			}
 		}
 		break;
@@ -2847,14 +2916,14 @@ network_trace(const elec_comp_t *upstream, const elec_comp_t *comp,
 			print_trace_data(comp, depth, false, 0);
 		return (comp->rw.in_volts * comp->rw.in_amps);
 	case ELEC_BUS:
-		for (unsigned i = 0; i < comp->bus.n_comps; i++) {
-			load_trace += network_trace(comp, comp->bus.comps[i],
+		for (unsigned i = 0; i < comp->n_links; i++) {
+			load_trace += network_trace(comp, comp->links[i].comp,
 			    depth + 1, false);
 		}
 		if (do_print) {
 			print_trace_data(comp, depth, false, load_trace);
-			for (unsigned i = 0; i < comp->bus.n_comps; i++) {
-				network_trace(comp, comp->bus.comps[i],
+			for (unsigned i = 0; i < comp->n_links; i++) {
+				network_trace(comp, comp->links[i].comp,
 				    depth + 1, true);
 			}
 		}
@@ -2868,29 +2937,29 @@ network_trace(const elec_comp_t *upstream, const elec_comp_t *comp,
 		}
 		break;
 	case ELEC_TIE:
-		for (unsigned i = 0; i < comp->tie.n_buses; i++) {
+		for (unsigned i = 0; i < comp->n_links; i++) {
 			if (comp->tie.wk_state[i]) {
 				load_trace += network_trace(comp,
-				    comp->tie.buses[i], depth + 1, false);
+				    comp->links[i].comp, depth + 1, false);
 			}
 		}
 		if (do_print) {
 			print_trace_data(comp, depth, false, load_trace);
-			for (unsigned i = 0; i < comp->tie.n_buses; i++) {
+			for (unsigned i = 0; i < comp->n_links; i++) {
 				if (comp->tie.wk_state[i]) {
 					load_trace += network_trace(comp,
-					    comp->tie.buses[i], depth + 1,
+					    comp->links[i].comp, depth + 1,
 					    true);
 				}
 			}
 		}
 		break;
 	case ELEC_DIODE:
-		load_trace = network_trace(comp, comp->diode.sides[1],
+		load_trace = network_trace(comp, comp->links[1].comp,
 		    depth + 1, false);
 		if (do_print) {
 			print_trace_data(comp, depth, false, load_trace);
-			network_trace(comp, comp->diode.sides[1],
+			network_trace(comp, comp->links[1].comp,
 			    depth + 1, true);
 		}
 		break;
@@ -2901,6 +2970,7 @@ network_trace(const elec_comp_t *upstream, const elec_comp_t *comp,
 	return (load_trace);
 }
 
+#ifdef	XXX
 static void
 network_integrity_check(elec_sys_t *sys)
 {
@@ -2975,6 +3045,7 @@ network_integrity_check(elec_sys_t *sys)
 		VERIFY_FAIL();
 	}
 }
+#endif
 
 static bool_t
 elec_sys_worker(void *userinfo)
@@ -3030,7 +3101,10 @@ elec_sys_worker(void *userinfo)
 	network_paint(sys);
 	network_load_integrate(sys, d_t);
 	network_loads_update(sys, d_t);
+	network_ties_update(sys);
+#ifdef	XXX
 	network_integrity_check(sys);
+#endif
 	/*
 	 * Must occur AFTER the integrity check! network_state_xfer touches
 	 * the rw state and syncs it to the ro state.
@@ -3067,10 +3141,8 @@ comp_free(elec_comp_t *comp)
 	dr_delete(&comp->drs.out_pwr);
 #endif	/* defined(LIBELEC_WITH_DRS) */
 
-	if (comp->info->type == ELEC_BUS) {
-		free(comp->bus.comps);
-	} else if (comp->info->type == ELEC_TIE) {
-		free(comp->tie.buses);
+	ZERO_FREE_N(comp->links, comp->n_links);
+	if (comp->info->type == ELEC_TIE) {
 		free(comp->tie.cur_state);
 		free(comp->tie.wk_state);
 		mutex_destroy(&comp->tie.lock);
@@ -3132,29 +3204,29 @@ libelec_tie_set_info_list(elec_comp_t *comp,
 	if (list_len == 0) {
 		mutex_enter(&comp->tie.lock);
 		memset(comp->tie.cur_state, 0,
-		    comp->tie.n_buses * sizeof (*comp->tie.cur_state));
+		    comp->n_links * sizeof (*comp->tie.cur_state));
 		mutex_exit(&comp->tie.lock);
 		return;
 	}
 
 	/* The buslist is immutable, so no need to lock */
-	new_state = safe_calloc(comp->tie.n_buses, sizeof (*new_state));
+	new_state = safe_calloc(comp->n_links, sizeof (*new_state));
 	for (size_t i = 0; i < list_len; i++) {
 		size_t j;
-		for (j = 0; j < comp->tie.n_buses; j++) {
-			if (comp->tie.buses[j]->info == bus_list[i]) {
+		for (j = 0; j < comp->n_links; j++) {
+			if (comp->links[j].comp->info == bus_list[i]) {
 				new_state[j] = true;
 				break;
 			}
 		}
-		ASSERT_MSG(j != comp->tie.n_buses,
+		ASSERT_MSG(j != comp->n_links,
 		    "Tie %s is not connected to bus %s", comp->info->name,
 		    bus_list[i]->name);
 	}
 
 	mutex_enter(&comp->tie.lock);
 	memcpy(comp->tie.cur_state, new_state,
-	    comp->tie.n_buses * sizeof (*comp->tie.cur_state));
+	    comp->n_links * sizeof (*comp->tie.cur_state));
 	mutex_exit(&comp->tie.lock);
 
 	free(new_state);
@@ -3213,7 +3285,7 @@ libelec_tie_set_all(elec_comp_t *comp, bool tied)
 		return;
 
 	mutex_enter(&comp->tie.lock);
-	for (unsigned i = 0; i < comp->tie.n_buses; i++)
+	for (unsigned i = 0; i < comp->n_links; i++)
 		comp->tie.cur_state[i] = tied;
 	mutex_exit(&comp->tie.lock);
 }
@@ -3228,7 +3300,7 @@ libelec_tie_get_all(elec_comp_t *comp)
 	ASSERT3U(comp->info->type, ==, ELEC_TIE);
 
 	mutex_enter(&comp->tie.lock);
-	for (unsigned i = 0; tied && i < comp->tie.n_buses; i++)
+	for (unsigned i = 0; tied && i < comp->n_links; i++)
 		tied &= comp->tie.cur_state[i];
 	mutex_exit(&comp->tie.lock);
 
@@ -3245,9 +3317,9 @@ libelec_tie_get(elec_comp_t *comp, elec_comp_t **bus_list)
 	ASSERT3U(comp->info->type, ==, ELEC_TIE);
 
 	mutex_enter(&comp->tie.lock);
-	for (unsigned i = 0; i < comp->tie.n_buses; i++) {
+	for (unsigned i = 0; i < comp->n_links; i++) {
 		if (comp->tie.cur_state[i])
-			bus_list[n_buses++] = comp->tie.buses[i];
+			bus_list[n_buses++] = comp->links[i].comp;
 	}
 	mutex_exit(&comp->tie.lock);
 
@@ -3261,7 +3333,7 @@ libelec_tie_get_num_buses(const elec_comp_t *comp)
 	ASSERT(comp->info != NULL);
 	ASSERT3U(comp->info->type, ==, ELEC_TIE);
 	/* This is immutable, so no need to lock */
-	return (comp->tie.n_buses);
+	return (comp->n_links);
 }
 
 bool
@@ -3290,15 +3362,15 @@ libelec_tie_get_list_v(elec_comp_t *tie, bool exclusive, va_list ap)
 	ASSERT3U(tie->info->type, ==, ELEC_TIE);
 
 	mutex_enter(&tie->tie.lock);
-	for (unsigned i = 0; i < tie->tie.n_buses; i++) {
+	for (unsigned i = 0; i < tie->n_links; i++) {
 		if (tie->tie.cur_state[i])
 			n_tied++;
 	}
 	for (list_len = 0; (bus = va_arg(ap, const elec_comp_t *)) != NULL;
 	    list_len++) {
 		bool found = false;
-		for (unsigned i = 0; i < tie->tie.n_buses; i++) {
-			if (tie->tie.buses[i] == bus) {
+		for (unsigned i = 0; i < tie->n_links; i++) {
+			if (tie->links[i].comp == bus) {
 				found = true;
 				if (!tie->tie.cur_state[i]) {
 					res = false;
@@ -3325,7 +3397,8 @@ elec_comp_t *
 libelec_comp_get_src(const elec_comp_t *comp)
 {
 	ASSERT(comp != NULL);
-	return (comp->src);
+	return (NULL);
+//	return (comp->srcs[0]);
 }
 
 /*
@@ -3336,7 +3409,8 @@ elec_comp_t *
 libelec_comp_get_upstream(const elec_comp_t *comp)
 {
 	ASSERT(comp != NULL);
-	return (comp->upstream);
+	return (NULL);
+//	return (comp->upstreams[0]);
 }
 
 double

@@ -33,6 +33,8 @@
 extern "C" {
 #endif
 
+#define	MAX_SRCS	24
+
 struct elec_sys_s {
 	bool		started;
 	worker_t	worker;
@@ -60,13 +62,13 @@ struct elec_sys_s {
 
 	list_t		comps;
 	list_t		gens_batts;
+	list_t		ties;
 
 	const elec_comp_info_t	*comp_infos;	/* immutable */
 	size_t			num_infos;
 };
 
 typedef struct {
-	elec_comp_t	*bus;
 	SERIALIZE_START_MARKER;
 	double		prev_amps;
 	double		chg_rel;
@@ -76,7 +78,6 @@ typedef struct {
 } elec_batt_t;
 
 typedef struct {
-	elec_comp_t	*bus;
 	double		ctr_rpm;
 	double		min_stab_U;
 	double		max_stab_U;
@@ -91,8 +92,6 @@ typedef struct {
 } elec_gen_t;
 
 typedef struct {
-	elec_comp_t	*ac;
-	elec_comp_t	*dc;
 	elec_comp_t	*batt;
 	elec_comp_t	*batt_conn;
 	double		prev_amps;
@@ -114,12 +113,6 @@ typedef struct {
 } elec_load_t;
 
 typedef struct {
-	elec_comp_t	**comps;
-	size_t		n_comps;
-} elec_bus_t;
-
-typedef struct {
-	elec_comp_t	*sides[2];
 #ifndef	LIBELEC_NO_LIBSWITCH
 	switch_t	*sw;		/* optional libswitch link */
 #endif
@@ -131,8 +124,6 @@ typedef struct {
 } elec_scb_t;
 
 typedef struct {
-	size_t		n_buses;
-	elec_comp_t	**buses;
 	/*
 	 * To prevent global locking from front-end functions, the tie
 	 * state is kept split between `cur_state' and `wk_state':
@@ -149,8 +140,10 @@ typedef struct {
 } elec_tie_t;
 
 typedef struct {
-	elec_comp_t	*sides[2];	/* bias: sides[0] -> sides[1] */
-} elec_diode_t;
+	elec_comp_t		*comp;
+	double			out_amps[MAX_SRCS];
+	elec_comp_t		*srcs[MAX_SRCS];
+} elec_link_t;
 
 struct elec_comp_s {
 	elec_sys_t		*sys;
@@ -162,6 +155,9 @@ struct elec_comp_s {
 	 * accounting of buses.
 	 */
 	uint64_t		integ_mask;
+	elec_link_t		*links;
+	unsigned		n_links;
+	unsigned		src_idx;
 
 	mutex_t			rw_ro_lock;
 
@@ -172,10 +168,10 @@ struct elec_comp_s {
 		double		in_amps;
 		double		out_amps;
 		double		short_amps;
-		double		in_pwr;		/* Watts */
-		double		out_pwr;	/* Watts */
-		double		in_freq;	/* Hz */
-		double		out_freq;	/* Hz */
+		double		in_pwr;			/* Watts */
+		double		out_pwr;		/* Watts */
+		double		in_freq;		/* Hz */
+		double		out_freq;		/* Hz */
 		bool		failed;
 		/*
 		 * Shorted components leak a lot of their energy out
@@ -189,22 +185,22 @@ struct elec_comp_s {
 	} rw, ro;
 	SERIALIZE_END_MARKER;
 
-	elec_comp_t		*src;
-	elec_comp_t		*upstream;
+	double			src_int_cond_total; /* Conductance, abstract */
+	uint64_t		src_mask;
+	elec_comp_t		*srcs[MAX_SRCS];
+	unsigned		n_srcs;
 	/*
 	 * Version for visualizer to avoid blinking when `src' gets reset.
 	 */
-	elec_comp_t		*src_vis;
+	elec_comp_t		*srcs_vis[MAX_SRCS];
 
 	union {
 		elec_batt_t	batt;
 		elec_gen_t	gen;
 		elec_tru_t	tru;
 		elec_load_t	load;
-		elec_bus_t	bus;
 		elec_scb_t	scb;
 		elec_tie_t	tie;
-		elec_diode_t	diode;
 	};
 
 #ifdef	LIBELEC_WITH_DRS
@@ -219,6 +215,8 @@ struct elec_comp_s {
 #endif	/* defined(LIBELEC_WITH_DRS) */
 
 	list_node_t		comps_node;
+	list_node_t		gens_batts_node;
+	list_node_t		ties_node;
 	avl_node_t		info2comp_node;
 	avl_node_t		name2comp_node;
 };

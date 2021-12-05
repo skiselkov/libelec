@@ -1,7 +1,7 @@
 /*
  * CONFIDENTIAL
  *
- * Copyright 2020 Saso Kiselkov. All rights reserved.
+ * Copyright 2021 Saso Kiselkov. All rights reserved.
  *
  * NOTICE:  All information contained herein is, and remains the property
  * of Saso Kiselkov. The intellectual and technical concepts contained
@@ -131,6 +131,7 @@ struct elec_comp_info_s {
 	void				*userinfo;
 	bool				autogen;
 	char				location[32];
+	double				int_R;	/* internal resistance, Ohms */
 	union {
 		elec_batt_info_t	batt;
 		elec_gen_info_t		gen;

@@ -1,7 +1,7 @@
-/*
+/*7
  * CONFIDENTIAL
  *
- * Copyright 2020 Saso Kiselkov. All rights reserved.
+ * Copyright 2021 Saso Kiselkov. All rights reserved.
  *
  * NOTICE:  All information contained herein is, and remains the property
  * of Saso Kiselkov. The intellectual and technical concepts contained
@@ -20,6 +20,7 @@
 #define	PX(pos)			(pos_scale * (pos))
 #define	LINE_HEIGHT		1
 #define	COMP_INFO_BG_RGB	0.8, 0.8, 0.8
+#define	MAX_NAME_LEN		128
 
 enum {
     TEXT_ALIGN_LEFT,
@@ -29,6 +30,49 @@ enum {
 
 static void show_text_aligned(cairo_t *cr, double x, double y, unsigned align,
     const char *format, ...) PRINTF_ATTR(5);
+
+static void
+make_comp_name(const char *in_name, char out_name[MAX_NAME_LEN])
+{
+	unsigned n;
+
+	ASSERT(in_name);
+	ASSERT(out_name);
+
+	strlcpy(out_name, in_name, MAX_NAME_LEN);
+	for (unsigned i = 0, n = strlen(out_name); i < n; i++) {
+		if (out_name[i] == '_')
+			out_name[i] = ' ';
+	}
+	if (strncmp(out_name, "CB ", 3) == 0)
+		memmove(out_name, &out_name[3], strlen(out_name) - 3 + 1);
+	n = strlen(out_name);
+	if (n > 4 && strcmp(&out_name[n - 4], " O P") == 0)
+		out_name[n - 2] = '/';
+}
+
+static void
+get_srcs(const elec_comp_t *comp, elec_comp_t *srcs[MAX_SRCS])
+{
+	ASSERT(comp != NULL);
+	ASSERT(srcs != NULL);
+
+	mutex_enter(&((elec_comp_t *)comp)->rw_ro_lock);
+	memcpy(srcs, comp->srcs_vis, sizeof (*srcs) * MAX_SRCS);
+	mutex_exit(&((elec_comp_t *)comp)->rw_ro_lock);
+}
+
+static unsigned
+count_srcs(elec_comp_t *srcs[MAX_SRCS])
+{
+	ASSERT(srcs != NULL);
+
+	for (unsigned n_srcs = 0; n_srcs < MAX_SRCS; n_srcs++) {
+		if (srcs[n_srcs] == NULL)
+			return (n_srcs);
+	}
+	return (MAX_SRCS);
+}
 
 static void
 show_text_aligned(cairo_t *cr, double x, double y, unsigned align,
@@ -71,16 +115,16 @@ tie_node_pos(const elec_comp_t *tie, unsigned i)
 
 	ASSERT(tie != NULL);
 	ASSERT3U(tie->info->type, ==, ELEC_TIE);
-	ASSERT3U(i, <, tie->tie.n_buses);
-	ASSERT(tie->tie.n_buses != 0);
+	ASSERT3U(i, <, tie->n_links);
+	ASSERT(tie->n_links != 0);
 
 	pos = tie->info->gui.pos;
-	if (tie->tie.n_buses == 2) {
+	if (tie->n_links == 2) {
 		if (i == 0)
 			return (VECT2(pos.x - 1, pos.y));
 		else
 			return (VECT2(pos.x + 1, pos.y));
-	} else if (tie->tie.n_buses == 3) {
+	} else if (tie->n_links == 3) {
 		vect2_t off;
 		switch (i) {
 		case 0:
@@ -98,7 +142,7 @@ tie_node_pos(const elec_comp_t *tie, unsigned i)
 	} else {
 		vect2_t off = vect2_rot(VECT2(0, 1), tie->info->gui.rot);
 
-		off = vect2_rot(off, i * (360.0 / tie->tie.n_buses));
+		off = vect2_rot(off, i * (360.0 / tie->n_links));
 		return (vect2_add(pos, VECT2(off.x, -off.y)));
 	}
 }
@@ -145,7 +189,7 @@ elec_comp_get_nearest_pos(const elec_comp_t *comp, vect2_t *comp_pos,
 	case ELEC_TIE: {
 		vect2_t p = VECT2(1e9, 1e9);
 
-		for (unsigned i = 0; i < comp->tie.n_buses; i++)
+		for (unsigned i = 0; i < comp->n_links; i++)
 			p = pick_closer(*bus_pos, p, tie_node_pos(comp, i));
 		*comp_pos = p;
 		break;
@@ -161,17 +205,48 @@ elec_comp_get_nearest_pos(const elec_comp_t *comp, vect2_t *comp_pos,
 }
 
 static void
-draw_src_path(cairo_t *cr, cairo_path_t *path, const elec_comp_t *src)
+draw_src_path(cairo_t *cr, cairo_path_t *path, const elec_comp_t *comp)
 {
+	cairo_pattern_t *pat;
+	vect3_t color;
+	elec_comp_t *srcs[MAX_SRCS];
+	unsigned n_srcs;
+
 	ASSERT(cr != NULL);
 	ASSERT(path != NULL);
+	ASSERT(comp != NULL);
 
-	if (src != NULL) {
-		vect3_t color = src->info->gui.color;
+	get_srcs(comp, srcs);
+	n_srcs = count_srcs(srcs);
+
+	switch (n_srcs) {
+	case 0:
+		break;
+	case 1:
+		color = srcs[0]->info->gui.color;
 		cairo_append_path(cr, path);
 		cairo_set_source_rgb(cr, color.x, color.y, color.z);
 		cairo_stroke(cr);
 		cairo_set_source_rgb(cr, 0, 0, 0);
+		break;
+	default:
+		pat = cairo_pattern_create_linear(0, 0, n_srcs * 8, n_srcs * 8);
+		cairo_pattern_set_extend(pat, CAIRO_EXTEND_REPEAT);
+		for (unsigned i = 0; i < n_srcs; i++) {
+			vect3_t color = srcs[i]->info->gui.color;
+			double off1 = i / (double)n_srcs;
+			double off2 = (i + 1) / (double)n_srcs;
+			cairo_pattern_add_color_stop_rgb(pat, off1,
+			    color.x, color.y, color.z);
+			cairo_pattern_add_color_stop_rgb(pat, off2,
+			    color.x, color.y, color.z);
+		}
+		cairo_append_path(cr, path);
+		cairo_set_source(cr, pat);
+		cairo_stroke(cr);
+		cairo_set_source_rgb(cr, 0, 0, 0);
+		cairo_pattern_destroy(pat);
+		break;
 	}
 	cairo_path_destroy(path);
 }
@@ -188,10 +263,10 @@ draw_bus_conns(cairo_t *cr, double pos_scale, const elec_comp_t *bus)
 
 	cairo_new_path(cr);
 
-	for (unsigned i = 0; i < bus->bus.n_comps; i++) {
+	for (unsigned i = 0; i < bus->n_links; i++) {
 		vect2_t bus_pos = bus->info->gui.pos;
 		vect2_t comp_pos;
-		const elec_comp_t *comp = bus->bus.comps[i];
+		const elec_comp_t *comp = bus->links[i].comp;
 		bool align_vert;
 		cairo_path_t *path;
 
@@ -219,7 +294,7 @@ draw_bus_conns(cairo_t *cr, double pos_scale, const elec_comp_t *bus)
 		cairo_stroke(cr);
 
 		cairo_set_line_width(cr, 2);
-		draw_src_path(cr, path, bus->src_vis);
+		draw_src_path(cr, path, bus);
 		/*
 		 * The black dimple on the bus showing the connection
 		 */
@@ -227,7 +302,7 @@ draw_bus_conns(cairo_t *cr, double pos_scale, const elec_comp_t *bus)
 			if (bus->info->gui.sz != 0 && !bus->info->gui.virt) {
 				cairo_arc(cr, PX(bus_pos.x), PX(bus_pos.y),
 				    PX(0.4), 0, DEG2RAD(360));
-			} else if (bus->bus.n_comps > 2) {
+			} else if (bus->n_links > 2) {
 				cairo_arc(cr, PX(bus_pos.x), PX(bus_pos.y),
 				    PX(0.25), 0, DEG2RAD(360));
 			}
@@ -241,6 +316,7 @@ draw_gen(cairo_t *cr, double pos_scale, const elec_comp_info_t *info)
 {
 	vect2_t pos;
 	vect3_t color;
+	char name[MAX_NAME_LEN];
 
 	ASSERT(cr != NULL);
 	ASSERT(info != NULL);
@@ -270,8 +346,9 @@ draw_gen(cairo_t *cr, double pos_scale, const elec_comp_info_t *info)
 	}
 	cairo_stroke(cr);
 
+	make_comp_name(info->name, name);
 	show_text_aligned(cr, PX(pos.x), PX(pos.y + 2), TEXT_ALIGN_CENTER,
-	    "%s", info->name);
+	    "%s", name);
 }
 
 static void
@@ -303,28 +380,33 @@ draw_bus(cairo_t *cr, double pos_scale, const elec_comp_t *bus)
 		path = cairo_copy_path(cr);
 		cairo_stroke(cr);
 		cairo_set_line_width(cr, !info->gui.virt ? 4 : 2);
-		draw_src_path(cr, path, bus->src_vis);
+		draw_src_path(cr, path, bus);
 		cairo_set_line_width(cr, 2);
 		cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
 	}
 
 	if (info->gui.sz != 0 && !info->gui.virt) {
+		char name[MAX_NAME_LEN];
+		make_comp_name(info->name, name);
 		show_text_aligned(cr, PX(pos.x), PX(pos.y - info->gui.sz - 1),
-		    TEXT_ALIGN_CENTER, "%s", info->name);
+		    TEXT_ALIGN_CENTER, "%s", name);
 	}
 }
 
 static void
 draw_cb_icon(cairo_t *cr, double pos_scale, double font_sz, vect2_t pos,
-    bool fuse, bool set, bool triphase, const char *name, vect3_t bg_color,
-    const elec_comp_t *src)
+    bool fuse, bool set, bool triphase, const char *comp_name,
+    vect3_t bg_color, const elec_comp_t *comp)
 {
 	double text_y_off;
 	cairo_path_t *path;
+	char name[MAX_NAME_LEN];
 
 	ASSERT(cr != NULL);
-	ASSERT(name != NULL);
+	ASSERT(comp_name != NULL);
+	ASSERT(comp != NULL);
 
+	make_comp_name(comp_name, name);
 	cairo_new_path(cr);
 
 	if (!fuse) {
@@ -351,7 +433,7 @@ draw_cb_icon(cairo_t *cr, double pos_scale, double font_sz, vect2_t pos,
 	cairo_stroke(cr);
 
 	cairo_set_line_width(cr, 2);
-	draw_src_path(cr, path, src);
+	draw_src_path(cr, path, comp);
 
 	if (fuse && !set) {
 		/* If the fuse is broken, remove the middle bit */
@@ -379,8 +461,6 @@ draw_cb_icon(cairo_t *cr, double pos_scale, double font_sz, vect2_t pos,
 	}
 
 	text_y_off = (fuse ? 1.5 : 0.8);
-	if (strncmp(name, "CB_", 3) == 0)
-		name = &name[3];
 	show_text_aligned(cr, PX(pos.x), PX(pos.y + text_y_off),
 	    TEXT_ALIGN_CENTER, "%s", name);
 }
@@ -393,7 +473,7 @@ draw_cb(cairo_t *cr, double pos_scale, const elec_comp_t *cb, double font_sz,
 	ASSERT(cb != NULL);
 	draw_cb_icon(cr, pos_scale, font_sz, cb->info->gui.pos,
 	    cb->info->cb.fuse, !cb->ro.failed && cb->scb.cur_set,
-	    cb->info->cb.triphase, cb->info->name, bg_color, cb->src_vis);
+	    cb->info->cb.triphase, cb->info->name, bg_color, cb);
 }
 
 static void
@@ -402,6 +482,7 @@ draw_shunt(cairo_t *cr, double pos_scale, const elec_comp_t *shunt)
 	vect2_t pos;
 	cairo_path_t *path;
 	const elec_comp_info_t *info;
+	char name[MAX_NAME_LEN];
 
 	ASSERT(cr != NULL);
 	ASSERT(shunt != NULL);
@@ -422,10 +503,11 @@ draw_shunt(cairo_t *cr, double pos_scale, const elec_comp_t *shunt)
 	cairo_stroke(cr);
 
 	cairo_set_line_width(cr, 2);
-	draw_src_path(cr, path, shunt->src_vis);
+	draw_src_path(cr, path, shunt);
 
+	make_comp_name(info->name, name);
 	show_text_aligned(cr, PX(pos.x), PX(pos.y + 1.7),
-	    TEXT_ALIGN_CENTER, "%s", info->name);
+	    TEXT_ALIGN_CENTER, "%s", name);
 }
 
 static void
@@ -433,6 +515,7 @@ draw_tru(cairo_t *cr, double pos_scale, const elec_comp_info_t *info)
 {
 	vect2_t pos;
 	vect3_t color;
+	char name[MAX_NAME_LEN];
 
 	ASSERT(cr != NULL);
 	ASSERT(info != NULL);
@@ -463,8 +546,9 @@ draw_tru(cairo_t *cr, double pos_scale, const elec_comp_info_t *info)
 
 	cairo_stroke(cr);
 
+	make_comp_name(info->name, name);
 	show_text_aligned(cr, PX(pos.x - 2), PX(pos.y),
-	    TEXT_ALIGN_RIGHT, "%s", info->name);
+	    TEXT_ALIGN_RIGHT, "%s", name);
 }
 
 static void
@@ -486,6 +570,7 @@ draw_tie(cairo_t *cr, double pos_scale, const elec_comp_t *tie)
 {
 	vect2_t endpt[2] = { NULL_VECT2, NULL_VECT2 };
 	vect2_t pos;
+	char name[MAX_NAME_LEN];
 
 	ASSERT(cr != NULL);
 	ASSERT(tie != NULL);
@@ -494,14 +579,14 @@ draw_tie(cairo_t *cr, double pos_scale, const elec_comp_t *tie)
 	cairo_new_path(cr);
 
 	cairo_set_line_width(cr, 4);
-	for (unsigned i = 0; i < tie->tie.n_buses; i++) {
-		elec_comp_t *remote_bus = tie->tie.buses[i];
+	for (unsigned i = 0; i < tie->n_links; i++) {
+		elec_comp_t *remote_bus = tie->links[i].comp;
 		vect2_t conn = VECT2(1e9, 1e9);
 
 		if (!tie->tie.cur_state[i])
 			continue;
 
-		for (unsigned j = 0; j < tie->tie.n_buses; j++) {
+		for (unsigned j = 0; j < tie->n_links; j++) {
 			conn = pick_closer(remote_bus->info->gui.pos, conn,
 			    tie_node_pos(tie, j));
 		}
@@ -520,10 +605,10 @@ draw_tie(cairo_t *cr, double pos_scale, const elec_comp_t *tie)
 		path = cairo_copy_path(cr);
 		cairo_stroke(cr);
 		cairo_set_line_width(cr, 2);
-		draw_src_path(cr, path, tie->src_vis);
+		draw_src_path(cr, path, tie);
 	} else {
 		/* Nothing tied, show the unconnected state */
-		if (tie->tie.n_buses == 2) {
+		if (tie->n_links == 2) {
 			cairo_move_to(cr, PX(pos.x - 1), PX(pos.y - 1));
 			cairo_rel_line_to(cr, PX(2), 0);
 		} else {
@@ -536,15 +621,16 @@ draw_tie(cairo_t *cr, double pos_scale, const elec_comp_t *tie)
 		cairo_stroke(cr);
 	}
 	cairo_set_line_width(cr, 2);
-	for (unsigned i = 0; i < tie->tie.n_buses; i++)
+	for (unsigned i = 0; i < tie->n_links; i++)
 		draw_node(cr, pos_scale, tie_node_pos(tie, i));
 
-	if (tie->tie.n_buses == 3) {
+	make_comp_name(tie->info->name, name);
+	if (tie->n_links == 3) {
 		show_text_aligned(cr, PX(pos.x), PX(pos.y + 1.8),
-		    TEXT_ALIGN_CENTER, "%s", tie->info->name);
+		    TEXT_ALIGN_CENTER, "%s", name);
 	} else {
 		show_text_aligned(cr, PX(pos.x), PX(pos.y + 1.5),
-		    TEXT_ALIGN_CENTER, "%s", tie->info->name);
+		    TEXT_ALIGN_CENTER, "%s", name);
 	}
 }
 
@@ -553,6 +639,7 @@ draw_diode(cairo_t *cr, double pos_scale, const elec_comp_t *diode,
     bool draw_line)
 {
 	vect2_t pos;
+	char name[MAX_NAME_LEN];
 
 	ASSERT(cr != NULL);
 	ASSERT(diode != NULL);
@@ -575,8 +662,9 @@ draw_diode(cairo_t *cr, double pos_scale, const elec_comp_t *diode,
 	cairo_stroke(cr);
 	cairo_restore(cr);
 
+	make_comp_name(diode->info->name, name);
 	show_text_aligned(cr, PX(pos.x), PX(pos.y + 1.5),
-	    TEXT_ALIGN_CENTER, "%s", diode->info->name);
+	    TEXT_ALIGN_CENTER, "%s", name);
 }
 
 static void
@@ -584,6 +672,7 @@ draw_load(cairo_t *cr, double pos_scale, double font_sz,
     const elec_comp_info_t *info)
 {
 	vect2_t pos;
+	char name[MAX_NAME_LEN];
 
 	ASSERT(cr != NULL);
 	ASSERT(info != NULL);
@@ -613,8 +702,9 @@ draw_load(cairo_t *cr, double pos_scale, double font_sz,
 		break;
 	}
 
+	make_comp_name(info->name, name);
 	show_text_aligned(cr, PX(pos.x), PX(pos.y + 1.7),
-	    TEXT_ALIGN_CENTER, "%s", info->name);
+	    TEXT_ALIGN_CENTER, "%s", name);
 }
 
 static void
@@ -623,6 +713,7 @@ draw_batt(cairo_t *cr, double pos_scale, const elec_comp_info_t *info,
 {
 	vect2_t pos;
 	vect3_t color;
+	char name[MAX_NAME_LEN];
 
 	ASSERT(cr != NULL);
 	ASSERT(info != NULL);
@@ -667,8 +758,9 @@ draw_batt(cairo_t *cr, double pos_scale, const elec_comp_info_t *info,
 
 	cairo_stroke(cr);
 
+	make_comp_name(info->name, name);
 	show_text_aligned(cr, PX(pos.x - 1.4), PX(pos.y),
-	    TEXT_ALIGN_RIGHT, "%s", info->name);
+	    TEXT_ALIGN_RIGHT, "%s", name);
 }
 
 static void
@@ -679,6 +771,7 @@ draw_label_box(cairo_t *cr, double pos_scale, double font_sz,
 	vect3_t color;
 	vect2_t pos, sz;
 	double dash[2] = { PX(1), PX(0.5) };
+	char name[MAX_NAME_LEN];
 
 	ASSERT(cr != NULL);
 	ASSERT(info != NULL);
@@ -688,7 +781,8 @@ draw_label_box(cairo_t *cr, double pos_scale, double font_sz,
 
 	cairo_set_font_size(cr, font_sz * info->label_box.font_scale);
 
-	cairo_text_extents(cr, info->name, &te);
+	make_comp_name(info->name, name);
+	cairo_text_extents(cr, name, &te);
 	pos = info->label_box.pos;
 	sz = info->label_box.sz;
 	color = info->gui.color;
@@ -721,7 +815,7 @@ draw_label_box(cairo_t *cr, double pos_scale, double font_sz,
 	cairo_set_source_rgb(cr, 0, 0, 0);
 	cairo_move_to(cr, PX(pos.x + sz.x / 2) - te.width / 2,
 	    PX(pos.y) - te.height / 2 - te.y_bearing);
-	cairo_show_text(cr, info->name);
+	cairo_show_text(cr, name);
 
 	cairo_restore(cr);
 }
@@ -752,7 +846,7 @@ libelec_draw_layout(const elec_sys_t *sys, cairo_t *cr, double pos_scale,
 		const elec_comp_info_t *info = comp->info;
 
 		ASSERT(info != NULL);
-		if (IS_NULL_VECT(info->gui.pos))
+		if (IS_NULL_VECT(info->gui.pos) || info->gui.invis)
 			continue;
 
 		switch (info->type) {
@@ -830,11 +924,11 @@ draw_comp_info(const elec_comp_t *comp, cairo_t *cr, double pos_scale,
 {
 	bool ac;
 	double U_in, I_in, W_in, U_out, I_out, W_out, f;
-	const elec_comp_t *src;
+	elec_comp_t *srcs[MAX_SRCS];
+	unsigned n_srcs;
 
 	ASSERT(comp != NULL);
 	ASSERT(cr != NULL);
-	src = comp->src_vis;
 
 	U_in = libelec_comp_get_in_volts(comp);
 	U_out = libelec_comp_get_out_volts(comp);
@@ -844,11 +938,27 @@ draw_comp_info(const elec_comp_t *comp, cairo_t *cr, double pos_scale,
 	I_out = libelec_comp_get_out_amps(comp);
 	W_in = libelec_comp_get_in_pwr(comp);
 	W_out = libelec_comp_get_out_pwr(comp);
+	get_srcs(comp, srcs);
+	n_srcs = count_srcs(srcs);
 
 	if (comp->info->type != ELEC_GEN) {
+		char name[MAX_NAME_LEN];
+		const char *powered_by;
+
+		switch (n_srcs) {
+		case 0:
+			powered_by = "nothing";
+			break;
+		case 1:
+			make_comp_name(srcs[0]->info->name, name);
+			powered_by = name;
+			break;
+		default:
+			powered_by = "(multiple)";
+			break;
+		}
 		show_text_aligned(cr, PX(pos.x), PX(pos.y),
-		    TEXT_ALIGN_LEFT, "Powered by: %s",
-		    src != NULL ? src->info->name : "nothing");
+		    TEXT_ALIGN_LEFT, "Powered by: %s", powered_by);
 		pos.y += LINE_HEIGHT;
 	}
 
@@ -888,15 +998,9 @@ draw_comp_info(const elec_comp_t *comp, cairo_t *cr, double pos_scale,
 		    "W   : %.*fW", fixed_decimals(W_out, 4), W_out);
 		pos.y += LINE_HEIGHT;
 		break;
-	case ELEC_BUS:
 	case ELEC_GEN:
-	case ELEC_LOAD:
-	case ELEC_CB:
-	case ELEC_SHUNT:
-	case ELEC_TIE:
-	case ELEC_DIODE:
-		show_text_aligned(cr, PX(pos.x), PX(pos.y),
-		    TEXT_ALIGN_LEFT, "U: %.*fV", fixed_decimals(U_in, 4), U_in);
+		show_text_aligned(cr, PX(pos.x), PX(pos.y), TEXT_ALIGN_LEFT,
+		    "U: %.*fV", fixed_decimals(U_out, 4), U_out);
 		pos.y += LINE_HEIGHT;
 		if (ac) {
 			show_text_aligned(cr, PX(pos.x), PX(pos.y),
@@ -904,11 +1008,32 @@ draw_comp_info(const elec_comp_t *comp, cairo_t *cr, double pos_scale,
 			    fixed_decimals(f, 4), f);
 			pos.y += LINE_HEIGHT;
 		}
-		show_text_aligned(cr, PX(pos.x), PX(pos.y),
-		    TEXT_ALIGN_LEFT, "I: %.*fA", fixed_decimals(I_in, 4), I_in);
+		show_text_aligned(cr, PX(pos.x), PX(pos.y), TEXT_ALIGN_LEFT,
+		    "I: %.*fA", fixed_decimals(I_out, 4), I_out);
 		pos.y += LINE_HEIGHT;
-		show_text_aligned(cr, PX(pos.x), PX(pos.y),
-		    TEXT_ALIGN_LEFT, "W: %.*fW", fixed_decimals(W_in, 4), W_in);
+		show_text_aligned(cr, PX(pos.x), PX(pos.y), TEXT_ALIGN_LEFT,
+		    "W: %.*fW", fixed_decimals(W_out, 4), W_out);
+		break;
+	case ELEC_BUS:
+	case ELEC_LOAD:
+	case ELEC_CB:
+	case ELEC_SHUNT:
+	case ELEC_TIE:
+	case ELEC_DIODE:
+		show_text_aligned(cr, PX(pos.x), PX(pos.y), TEXT_ALIGN_LEFT,
+		    "U: %.*fV", fixed_decimals(U_in, 4), U_in);
+		pos.y += LINE_HEIGHT;
+		if (ac) {
+			show_text_aligned(cr, PX(pos.x), PX(pos.y),
+			    TEXT_ALIGN_LEFT, "f: %.*fHz",
+			    fixed_decimals(f, 4), f);
+			pos.y += LINE_HEIGHT;
+		}
+		show_text_aligned(cr, PX(pos.x), PX(pos.y), TEXT_ALIGN_LEFT,
+		    "I: %.*fA", fixed_decimals(I_in, 4), I_in);
+		pos.y += LINE_HEIGHT;
+		show_text_aligned(cr, PX(pos.x), PX(pos.y), TEXT_ALIGN_LEFT,
+		    "W: %.*fW", fixed_decimals(W_in, 4), W_in);
 		break;
 	case ELEC_LABEL_BOX:
 		break;
@@ -1150,28 +1275,31 @@ draw_bus_info(const elec_comp_t *bus, cairo_t *cr, double pos_scale,
 	unsigned comp_i = 0, num_loads = 0;
 	double y, height, U;
 	cairo_path_t *path;
+	char name[MAX_NAME_LEN];
 
 	ASSERT(bus != NULL);
 	ASSERT(bus->info != NULL);
 	ASSERT3U(bus->info->type, ==, ELEC_BUS);
 
-	for (unsigned i = 0; i < bus->bus.n_comps; i++) {
-		ASSERT(bus->bus.comps[i] != NULL);
-		ASSERT(bus->bus.comps[i]->info != NULL);
-		if (bus->bus.comps[i]->info->type == ELEC_CB)
+	for (unsigned i = 0; i < bus->n_links; i++) {
+		ASSERT(bus->links[i].comp != NULL);
+		ASSERT(bus->links[i].comp->info != NULL);
+		if (bus->links[i].comp->info->type == ELEC_CB)
 			num_loads++;
 	}
 	height = LINE_H * (1 + ceil(num_loads / 2.0));
 	draw_comp_bg(cr, pos_scale, pos, VECT2(30, height));
 
+	make_comp_name(bus->info->name, name);
 	show_text_aligned(cr, PX(pos.x), PX(pos.y - height / 2 + 0.3 * LINE_H),
-	    TEXT_ALIGN_CENTER, "%s", bus->info->name);
+	    TEXT_ALIGN_CENTER, "%s", name);
 	U = libelec_comp_get_in_volts(bus);
 	show_text_aligned(cr, PX(pos.x), PX(pos.y - height / 2 + 0.7 * LINE_H),
 	    TEXT_ALIGN_CENTER, "U: %.*fV", fixed_decimals(U, 4), U);
 	y = pos.y - height / 2 + LINE_H * 1.5;
-	for (unsigned i = 0; i < bus->bus.n_comps; i++) {
-		const elec_comp_t *comp = bus->bus.comps[i];
+
+	for (unsigned i = 0; i < bus->n_links; i++) {
+		const elec_comp_t *comp = bus->links[i].comp;
 		const elec_comp_info_t *info = comp->info;
 		vect2_t comp_pos;
 		double I, W;
@@ -1191,7 +1319,7 @@ draw_bus_info(const elec_comp_t *bus, cairo_t *cr, double pos_scale,
 		path = cairo_copy_path(cr);
 		cairo_stroke(cr);
 		cairo_set_line_width(cr, 2);
-		draw_src_path(cr, path, bus->src_vis);
+		draw_src_path(cr, path, comp);
 
 		if (comp_i + 2 < num_loads) {
 			cairo_set_line_width(cr, 1);
@@ -1212,7 +1340,7 @@ draw_bus_info(const elec_comp_t *bus, cairo_t *cr, double pos_scale,
 		draw_cb_icon(cr, pos_scale, font_sz, comp_pos,
 		    info->cb.fuse, comp->scb.cur_set,
 		    info->cb.triphase, info->name,
-		    (vect3_t){COMP_INFO_BG_RGB}, comp->src_vis);
+		    (vect3_t){COMP_INFO_BG_RGB}, comp);
 		I = libelec_comp_get_in_amps(comp);
 		W = libelec_comp_get_in_pwr(comp);
 		if (comp_i % 2 == 0) {
@@ -1247,7 +1375,7 @@ draw_bus_info(const elec_comp_t *bus, cairo_t *cr, double pos_scale,
 	path = cairo_copy_path(cr);
 	cairo_stroke(cr);
 	cairo_set_line_width(cr, 4);
-	draw_src_path(cr, path, bus->src_vis);
+	draw_src_path(cr, path, bus);
 	cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
 	cairo_set_line_width(cr, 2);
 }
