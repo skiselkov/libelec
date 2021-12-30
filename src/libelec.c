@@ -52,8 +52,8 @@ typedef struct {
 } user_cb_info_t;
 
 static const vect2_t batt_temp_energy_curve[] = {
-    VECT2(C2KELVIN(-90), 0),
-    VECT2(C2KELVIN(-75), 0.0),
+    VECT2(C2KELVIN(-90), 0.01),
+    VECT2(C2KELVIN(-75), 0.01),
     VECT2(C2KELVIN(-50), 0.125),
     VECT2(C2KELVIN(-20), 0.45),
     VECT2(C2KELVIN(-5), 0.7),
@@ -1903,9 +1903,11 @@ network_update_batt(elec_comp_t *batt, double d_t)
 		batt->rw.in_volts = 0;
 		batt->rw.out_volts = 0;
 	}
-	batt->batt.chg_rel = J / J_max;
-	ASSERT3F(batt->batt.chg_rel, >=, 0);
-	ASSERT3F(batt->batt.chg_rel, <=, 1);
+	/*
+	 * If the temperature is very cold, we might slightly overshoot
+	 * capacity here, so clamp to 0-1.
+	 */
+	batt->batt.chg_rel = clamp(J / J_max, 0, 1);
 }
 
 static void
