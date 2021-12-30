@@ -3389,30 +3389,6 @@ out:
 	return (res);
 }
 
-/*
- * This function returns internal mutable state, so it MUSTN'T be used
- * for production code!
- */
-elec_comp_t *
-libelec_comp_get_src(const elec_comp_t *comp)
-{
-	ASSERT(comp != NULL);
-	return (NULL);
-//	return (comp->srcs[0]);
-}
-
-/*
- * This function returns internal mutable state, so it MUSTN'T be used
- * for production code!
- */
-elec_comp_t *
-libelec_comp_get_upstream(const elec_comp_t *comp)
-{
-	ASSERT(comp != NULL);
-	return (NULL);
-//	return (comp->upstreams[0]);
-}
-
 double
 libelec_batt_get_chg_rel(const elec_comp_t *batt)
 {

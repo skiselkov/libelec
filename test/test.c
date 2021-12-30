@@ -27,7 +27,6 @@
 
 #include "libelec.h"
 #include "libelec_drawing.h"
-#include "libelec_test.h"
 
 #define	WHITE_RGB	1, 1, 1
 #define	BLACK_RGB	0, 0, 0
@@ -119,25 +118,16 @@ static void
 paint_i(elec_comp_t *comp, void *userinfo)
 {
 	const elec_comp_info_t *info = libelec_comp2info(comp);
-	elec_comp_t *src = libelec_comp_get_src(comp);
-	const elec_comp_info_t *src_info =
-	    (src != NULL ? libelec_comp2info(src) : NULL);
-	elec_comp_t *upstream = libelec_comp_get_upstream(comp);
-	const elec_comp_info_t *upstream_info =
-	    (upstream != NULL ? libelec_comp2info(upstream) : NULL);
-	const char *src_name, *upstream_name;
 
 	UNUSED(userinfo);
 
 	if ((info->type != ELEC_BUS && info->type != ELEC_TRU) ||
-	    info->autogen)
+	    info->autogen) {
 		return;
+	}
 
-	src_name = (src_info != NULL ? src_info->name : "");
-	upstream_name = (upstream_info != NULL ? upstream_info->name : "");
-	UNUSED(upstream_name);
-	printf("%-24s %-12s %5.1fV %5.1fA %4.0fW %5.1fV %5.1fA %4.0fW\n",
-	    info->name, src_name,
+	printf("%-24s %5.1fV %5.1fA %4.0fW %5.1fV %5.1fA %4.0fW\n",
+	    info->name,
 	    libelec_comp_get_in_volts(comp),
 	    libelec_comp_get_in_amps(comp),
 	    libelec_comp_get_in_pwr(comp),
@@ -150,30 +140,25 @@ static void
 paint(void)
 {
 	printf(
-	    "BUS NAME                 SRC            U_in   I_in  W_in  "
+	    "BUS NAME                  U_in   I_in  W_in  "
 	    "U_out  I_out W_out\n"
-	    "-----------------        -----------   -----  ----- -----  "
+	    "-----------------        -----  ----- -----  "
 	    "-----  ----- -----\n");
-	libelec_walk_comps(sys, paint_i, NULL);
+       libelec_walk_comps(sys, paint_i, NULL);
 }
 
 static void
 print_cbs_i(elec_comp_t *comp, void *userinfo)
 {
 	const elec_comp_info_t *info = libelec_comp2info(comp);
-	elec_comp_t *src = libelec_comp_get_src(comp);
-	const elec_comp_info_t *src_info =
-	    (src != NULL ? libelec_comp2info(src) : NULL);
-	const char *src_name;
 
 	UNUSED(userinfo);
 
 	if (info->type != ELEC_CB)
 		return;
 
-	src_name = (src_info != NULL ? src_info->name : "");
-	printf("%-24s %-14s %5.1fV %5.1fA %5.2f  %3s\n",
-	    info->name, src_name,
+	printf("%-24s %5.1fV %5.1fA %5.2f  %3s\n",
+	    info->name,
 	    libelec_comp_get_in_volts(comp),
 	    libelec_comp_get_in_amps(comp),
 	    libelec_cb_get_temp(comp),
@@ -184,9 +169,9 @@ static void
 print_cbs(void)
 {
 	printf(
-	    "CB NAME                    SRC               U      I  TEMP  "
+	    "CB NAME                        U      I  TEMP  "
 	    "SET\n"
-	    "-------                    ----------    -----  -----  ----  "
+	    "-------                    -----  -----  ----  "
 	    "---\n");
 	libelec_walk_comps(sys, print_cbs_i, NULL);
 }
@@ -195,19 +180,14 @@ static void
 print_loads_i(elec_comp_t *comp, void *userinfo)
 {
 	const elec_comp_info_t *info = libelec_comp2info(comp);
-	elec_comp_t *src = libelec_comp_get_src(comp);
-	const elec_comp_info_t *src_info =
-	    (src != NULL ? libelec_comp2info(src) : NULL);
-	const char *src_name;
 
 	UNUSED(userinfo);
 
 	if (info->type != ELEC_LOAD)
 		return;
 
-	src_name = (src_info != NULL ? src_info->name : "");
-	printf("%-30s %-12s %6.1fV %5.1fA %6.1fW %6.1fV %5.1fA\n",
-	    info->name, src_name,
+	printf("%-30s %6.1fV %5.1fA %6.1fW %6.1fV %5.1fA\n",
+	    info->name,
 	    libelec_comp_get_out_volts(comp),
 	    libelec_comp_get_out_amps(comp),
 	    libelec_comp_get_out_pwr(comp),
