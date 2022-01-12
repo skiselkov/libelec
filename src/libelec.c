@@ -2594,6 +2594,7 @@ network_load_integrate_bus(const elec_comp_t *src, const elec_comp_t *upstream,
 			out_amps_total += comp->links[i].out_amps[src->src_idx];
 		}
 	}
+	out_amps_total /= (1 - comp->rw.leak_factor);
 	return (out_amps_total);
 }
 
