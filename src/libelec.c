@@ -706,8 +706,6 @@ libelec_deserialize(elec_sys_t *sys, const conf_t *ser, const char *prefix)
 		if (!elec_comp_deserialize(comp, ser, prefix)) {
 			logMsg("Failed to deserialize %s: malformed state",
 			    comp->info->name);
-			mutex_exit(&sys->worker_interlock);
-			return (false);
 		}
 	}
 
