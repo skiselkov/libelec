@@ -43,6 +43,7 @@
 #define	EXEC_INTVAL		40000	/* us */
 #define	MAX_NETWORK_DEPTH	100	/* dimensionless */
 #define	NO_NEG_ZERO(x)		((x) == 0.0 ? 0.0 : (x))
+#define	CB_SW_ON_DELAY		0.33	/* sec */
 
 typedef struct {
 	bool		pre;
@@ -791,6 +792,8 @@ libelec_create_cb_switches(const elec_sys_t *sys, const char *prefix,
 			/* Invert the CB so '0' is popped and '1' is pushed */
 			libswitch_set_anim_offset(comp->scb.sw, -1, 1);
 			libswitch_set(comp->scb.sw, 0);
+			libswitch_button_set_turn_on_delay(comp->scb.sw,
+			    CB_SW_ON_DELAY);
 		}
 	}
 }
