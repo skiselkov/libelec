@@ -1,7 +1,7 @@
 /*
  * CONFIDENTIAL
  *
- * Copyright 2021 Saso Kiselkov. All rights reserved.
+ * Copyright 2022 Saso Kiselkov. All rights reserved.
  *
  * NOTICE:  All information contained herein is, and remains the property
  * of Saso Kiselkov. The intellectual and technical concepts contained
@@ -18,6 +18,7 @@
 #ifdef	XPLANE
 #include <acfutils/dr.h>
 #endif
+#include <acfutils/htbl.h>
 #include <acfutils/list.h>
 #include <acfutils/worker.h>
 #include <acfutils/thread.h>
@@ -26,6 +27,8 @@
 #ifndef	LIBELEC_NO_LIBSWITCH
 #include <libswitch.h>
 #endif
+
+#include "libelec_types_net.h"
 
 #include "libelec.h"
 
@@ -54,6 +57,8 @@ struct elec_sys_s {
 	} drs;
 #endif	/* defined(XPLANE) */
 
+	uint64_t	conf_crc;
+
 	avl_tree_t	info2comp;
 	avl_tree_t	name2comp;
 
@@ -61,11 +66,27 @@ struct elec_sys_s {
 	avl_tree_t	user_cbs;
 
 	list_t		comps;
+	elec_comp_t	**comps_array;		/* length list_count(&comps) */
 	list_t		gens_batts;
 	list_t		ties;
 
-	const elec_comp_info_t	*comp_infos;	/* immutable */
+	elec_comp_info_t	*comp_infos;	/* immutable after parse */
 	size_t			num_infos;
+	struct {
+		bool		active;
+		/* protected by worker_interlock */
+		htbl_t		conns;		/* list of net_conn_t's */
+		list_t		conns_list;
+		/* only accessed from worker thread */
+		unsigned	xmit_ctr;
+		netlink_proto_t	proto;
+	} net_send;
+	struct {
+		bool		active;
+		uint8_t		*map;
+		bool		map_dirty;
+		netlink_proto_t	proto;
+	} net_recv;
 };
 
 typedef struct {
@@ -158,6 +179,7 @@ struct elec_comp_s {
 	elec_link_t		*links;
 	unsigned		n_links;
 	unsigned		src_idx;
+	unsigned		comp_idx;
 
 	mutex_t			rw_ro_lock;
 

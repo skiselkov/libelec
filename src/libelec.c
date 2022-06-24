@@ -1,7 +1,7 @@
 /*
  * CONFIDENTIAL
  *
- * Copyright 2021 Saso Kiselkov. All rights reserved.
+ * Copyright 2022 Saso Kiselkov. All rights reserved.
  *
  * NOTICE:  All information contained herein is, and remains the property
  * of Saso Kiselkov. The intellectual and technical concepts contained
@@ -44,6 +44,35 @@
 #define	MAX_NETWORK_DEPTH	100	/* dimensionless */
 #define	NO_NEG_ZERO(x)		((x) == 0.0 ? 0.0 : (x))
 #define	CB_SW_ON_DELAY		0.33	/* sec */
+#define	MAX_COMPS		(UINT16_MAX + 1)
+
+#define	LIBELEC_NET_VERSION	1
+#define	NETMAPGET(map, idx)	\
+	((((map)[(idx) >> 3]) & (1 << ((idx) & 7))) != 0)
+#define	NETMAPSET(map, idx) \
+	do { \
+		(map)[(idx) >> 3] |= (1 << ((idx) & 7)); \
+	} while (0)
+#define	NETMAPSZ(sys)		(list_count(&sys->comps) % 8 == 0 ? \
+    (list_count(&sys->comps) / 8) : (list_count(&sys->comps) / 8 + 1))
+#define	NETMAPSZ_REQ(sys)	(sizeof (net_req_map_t) + NETMAPSZ(sys))
+static bool send_net_recv_map(elec_sys_t *sys);
+static void net_add_recv_comp(elec_comp_t *comp);
+
+#define	NET_XMIT_INTVAL		5	/* divisor for 1 / EXEC_INTVAL */
+#define	NET_VOLTS_FACTOR	20.0	/* 0.05 V */
+#define	NET_AMPS_FACTOR		40.0	/* 0.025 A */
+#define	NET_FREQ_FACTOR		20.0	/* 0.05 Hz */
+
+#define	NET_ADD_RECV_COMP(comp)	net_add_recv_comp((elec_comp_t *)comp)
+
+/* #define	LIBELEC_NET_DBG */
+
+#ifdef	LIBELEC_NET_DBG
+#define	NET_DBG_LOG(...)	logMsg(__VA_ARGS__)
+#else
+#define	NET_DBG_LOG(...)
+#endif
 
 typedef struct {
 	bool		pre;
@@ -64,6 +93,10 @@ static const vect2_t batt_temp_energy_curve[] = {
     NULL_VECT2
 };
 
+static elec_comp_info_t *infos_parse(const char *filename,
+    const elec_func_bind_t *binds, size_t *num_infos);
+static void infos_free(elec_comp_info_t *infos, size_t num_infos);
+
 static bool_t elec_sys_worker(void *userinfo);
 static void comp_free(elec_comp_t *comp);
 static void network_paint_src_comp(elec_comp_t *src, elec_comp_t *upstream,
@@ -75,6 +108,14 @@ static double network_load_integrate_load(const elec_comp_t *src,
 
 static double network_trace(const elec_comp_t *upstream,
     const elec_comp_t *comp, unsigned depth, bool do_print);
+
+static void netlink_send_msg_notif(nng_pipe pipe, const void *buf,
+    size_t bufsz, void *userinfo);
+static void netlink_recv_msg_notif(nng_pipe pipe, const void *buf,
+    size_t bufsz, void *userinfo);
+
+static void elec_net_send_update(elec_sys_t *sys);
+static void elec_net_recv_update(elec_sys_t *sys);
 
 #ifdef	XPLANE
 /*
@@ -374,15 +415,40 @@ check_comp_links(elec_sys_t *sys)
 #undef	CHECK_LINK
 }
 
+elec_comp_info_t *
+libelec_get_comp_infos(const elec_sys_t *sys, size_t *num_infos)
+{
+	ASSERT(sys != NULL);
+	ASSERT(num_infos != NULL);
+	*num_infos = sys->num_infos;
+	return (sys->comp_infos);
+}
+
 elec_sys_t *
-libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
+libelec_new(const char *filename, const elec_func_bind_t *binds)
 {
 	elec_sys_t *sys = safe_calloc(1, sizeof (*sys));
-	unsigned src_i = 0;
+	unsigned src_i = 0, comp_i = 0;
+	void *buf;
+	size_t bufsz;
 
-	ASSERT(comp_infos != NULL);
-	ASSERT3U(num_infos, >, 0);
+	ASSERT(filename != NULL);
+	/* binds can be NULL */
 
+	buf = file2buf(filename, &bufsz);
+	if (buf == NULL) {
+		logMsg("Can't open %s: %s", filename, strerror(errno));
+		ZERO_FREE(sys);
+		return (NULL);
+	}
+	sys->conf_crc = crc64(buf, bufsz);
+	free(buf);
+
+	sys->comp_infos = infos_parse(filename, binds, &sys->num_infos);
+	if (sys->comp_infos == NULL) {
+		ZERO_FREE(sys);
+		return (NULL);
+	}
 	list_create(&sys->comps, sizeof (elec_comp_t),
 	    offsetof(elec_comp_t, comps_node));
 	list_create(&sys->gens_batts, sizeof (elec_comp_t),
@@ -401,10 +467,10 @@ libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 	mutex_init(&sys->paused_lock);
 	sys->time_factor = 1;
 
-	for (size_t i = 0; i < num_infos; i++) {
+	for (size_t i = 0; i < sys->num_infos; i++) {
 		elec_comp_t *comp = safe_calloc(1, sizeof (*comp));
 		avl_index_t where;
-		elec_comp_info_t *info = &comp_infos[i];
+		elec_comp_info_t *info = &sys->comp_infos[i];
 
 		comp->sys = sys;
 		comp->info = info;
@@ -468,7 +534,9 @@ libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 			    comp->info->gen.max_rpm);
 			ASSERT3F(comp->info->gen.max_pwr, >, 0);
 			ASSERT(comp->info->gen.eff_curve != NULL);
-			ASSERT(comp->info->gen.get_rpm != NULL);
+			ASSERT(comp->info->gen.get_rpm != NULL ||
+			    binds == NULL);
+
 			comp->gen.ctr_rpm = AVG(comp->info->gen.min_rpm,
 			    comp->info->gen.max_rpm);
 			comp->gen.max_stab_U =
@@ -540,7 +608,18 @@ libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 	/* Resolve component links */
 	resolve_comp_links(sys);
 	check_comp_links(sys);
-
+	/*
+	 * Network sending is using 16-bit indices
+	 */
+	ASSERT3U(list_count(&sys->comps), <=, MAX_COMPS);
+	sys->comps_array = safe_calloc(list_count(&sys->comps),
+	    sizeof (*sys->comps_array));
+	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
+	    comp = list_next(&sys->comps, comp)) {
+		sys->comps_array[comp_i] = comp;
+		comp->comp_idx = comp_i;
+		comp_i++;
+	}
 #ifdef	XPLANE
 	fdr_find(&sys->drs.sim_speed_act, "sim/time/sim_speed_actual");
 	fdr_find(&sys->drs.sim_time, "sim/time/total_running_time_sec");
@@ -549,9 +628,6 @@ libelec_new(elec_comp_info_t *comp_infos, size_t num_infos)
 	VERIFY(XPLMRegisterDrawCallback(elec_draw_cb, xplm_Phase_Window,
 	    0, sys));
 #endif	/* defined(XPLANE) */
-
-	sys->comp_infos = comp_infos;
-	sys->num_infos = num_infos;
 
 	return (sys);
 }
@@ -579,6 +655,10 @@ libelec_sys_stop(elec_sys_t *sys)
 		return;
 
 	worker_fini(&sys->worker);
+	if (sys->net_recv.active) {
+		memset(sys->net_recv.map, 0, NETMAPSZ(sys));
+		send_net_recv_map(sys);
+	}
 	sys->started = false;
 }
 
@@ -682,6 +762,7 @@ libelec_serialize(elec_sys_t *sys, conf_t *ser, const char *prefix)
 	ASSERT(sys != NULL);
 	ASSERT(ser != NULL);
 	ASSERT(prefix != NULL);
+	ASSERT(!sys->net_recv.active);
 
 	mutex_enter(&sys->worker_interlock);
 
@@ -699,6 +780,7 @@ libelec_deserialize(elec_sys_t *sys, const conf_t *ser, const char *prefix)
 	ASSERT(sys != NULL);
 	ASSERT(ser != NULL);
 	ASSERT(prefix != NULL);
+	ASSERT(!sys->net_recv.active);
 
 	mutex_enter(&sys->worker_interlock);
 
@@ -727,6 +809,9 @@ libelec_destroy(elec_sys_t *sys)
 	/* libelec_sys_stop MUST be called first! */
 	ASSERT(!sys->started);
 
+	libelec_disable_net_send(sys);
+	libelec_disable_net_recv(sys);
+
 	cookie = NULL;
 	while ((ucbi = avl_destroy_nodes(&sys->user_cbs, &cookie)) != NULL)
 		free(ucbi);
@@ -754,9 +839,12 @@ libelec_destroy(elec_sys_t *sys)
 	while ((comp = list_remove_head(&sys->comps)) != NULL)
 		comp_free(comp);
 	list_destroy(&sys->comps);
+	free(sys->comps_array);
 
 	mutex_destroy(&sys->worker_interlock);
 	mutex_destroy(&sys->paused_lock);
+
+	infos_free(sys->comp_infos, sys->num_infos);
 
 #ifdef	XPLANE
 	VERIFY(XPLMUnregisterDrawCallback(elec_draw_cb, xplm_Phase_Window,
@@ -843,6 +931,10 @@ bind_list_find(const elec_func_bind_t *binds, const char *name, void *ptr)
 {
 	void **pp = (void **)ptr;
 
+	if (binds == NULL) {
+		*pp = NULL;
+		return (true);
+	}
 	for (size_t i = 0; binds != NULL && binds[i].name != NULL; i++) {
 		if (strcmp(binds[i].name, name) == 0) {
 			*pp = binds[i].value;
@@ -921,8 +1013,8 @@ str2load_type(const char *str)
 	return (GUI_LOAD_GENERIC);
 }
 
-elec_comp_info_t *
-libelec_infos_parse(const char *filename, const elec_func_bind_t *binds,
+static elec_comp_info_t *
+infos_parse(const char *filename, const elec_func_bind_t *binds,
     size_t *num_infos)
 {
 #define	MAX_BUS_UNIQ	256
@@ -1379,8 +1471,8 @@ errout:
 	return (NULL);
 }
 
-void
-libelec_parsed_info_free(elec_comp_info_t *infos, size_t num_infos)
+static void
+infos_free(elec_comp_info_t *infos, size_t num_infos)
 {
 	ASSERT(infos != NULL || num_infos == 0);
 	for (size_t i = 0; i < num_infos; i++) {
@@ -1528,6 +1620,7 @@ libelec_comp_get_in_volts(const elec_comp_t *comp)
 
 	ASSERT(comp != NULL);
 
+	NET_ADD_RECV_COMP(comp);
 	mutex_enter((mutex_t *)&comp->rw_ro_lock);
 	volts = comp->ro.in_volts;
 	mutex_exit((mutex_t *)&comp->rw_ro_lock);
@@ -1542,6 +1635,7 @@ libelec_comp_get_out_volts(const elec_comp_t *comp)
 
 	ASSERT(comp != NULL);
 
+	NET_ADD_RECV_COMP(comp);
 	mutex_enter((mutex_t *)&comp->rw_ro_lock);
 	volts = comp->ro.out_volts;
 	mutex_exit((mutex_t *)&comp->rw_ro_lock);
@@ -1556,6 +1650,7 @@ libelec_comp_get_in_amps(const elec_comp_t *comp)
 
 	ASSERT(comp != NULL);
 
+	NET_ADD_RECV_COMP(comp);
 	mutex_enter((mutex_t *)&comp->rw_ro_lock);
 	amps = comp->ro.in_amps * (1 - comp->ro.leak_factor);
 	mutex_exit((mutex_t *)&comp->rw_ro_lock);
@@ -1570,6 +1665,7 @@ libelec_comp_get_out_amps(const elec_comp_t *comp)
 
 	ASSERT(comp != NULL);
 
+	NET_ADD_RECV_COMP(comp);
 	mutex_enter((mutex_t *)&comp->rw_ro_lock);
 	amps = comp->ro.out_amps * (1 - comp->ro.leak_factor);
 	mutex_exit((mutex_t *)&comp->rw_ro_lock);
@@ -1584,6 +1680,7 @@ libelec_comp_get_in_pwr(const elec_comp_t *comp)
 
 	ASSERT(comp != NULL);
 
+	NET_ADD_RECV_COMP(comp);
 	mutex_enter((mutex_t *)&comp->rw_ro_lock);
 	watts = comp->ro.in_pwr * (1 - comp->ro.leak_factor);
 	mutex_exit((mutex_t *)&comp->rw_ro_lock);
@@ -1598,6 +1695,7 @@ libelec_comp_get_out_pwr(const elec_comp_t *comp)
 
 	ASSERT(comp != NULL);
 
+	NET_ADD_RECV_COMP(comp);
 	mutex_enter((mutex_t *)&comp->rw_ro_lock);
 	watts = comp->ro.out_pwr * (1 - comp->ro.leak_factor);
 	mutex_exit((mutex_t *)&comp->rw_ro_lock);
@@ -1612,6 +1710,7 @@ libelec_comp_get_in_freq(const elec_comp_t *comp)
 
 	ASSERT(comp != NULL);
 
+	NET_ADD_RECV_COMP(comp);
 	mutex_enter((mutex_t *)&comp->rw_ro_lock);
 	freq = comp->ro.in_freq;
 	mutex_exit((mutex_t *)&comp->rw_ro_lock);
@@ -1626,6 +1725,7 @@ libelec_comp_get_out_freq(const elec_comp_t *comp)
 
 	ASSERT(comp != NULL);
 
+	NET_ADD_RECV_COMP(comp);
 	mutex_enter((mutex_t *)&comp->rw_ro_lock);
 	freq = comp->ro.out_freq;
 	mutex_exit((mutex_t *)&comp->rw_ro_lock);
@@ -1695,6 +1795,7 @@ bool
 libelec_comp_get_failed(const elec_comp_t *comp)
 {
 	ASSERT(comp != NULL);
+	NET_ADD_RECV_COMP(comp);
 	return (comp->ro.failed);
 }
 
@@ -1711,6 +1812,7 @@ bool
 libelec_comp_get_shorted(const elec_comp_t *comp)
 {
 	ASSERT(comp != NULL);
+	NET_ADD_RECV_COMP(comp);
 	return (comp->ro.shorted);
 }
 
@@ -3087,6 +3189,14 @@ elec_sys_worker(void *userinfo)
 	}
 #endif	/* defined(LIBELEC_TIMING_DEBUG) */
 
+	/*
+	 * In net-recv mode, we only listen in for updates to our requested
+	 * endpoints and nothing else.
+	 */
+	if (sys->net_recv.active) {
+		elec_net_recv_update(sys);
+		return (true);
+	}
 	mutex_enter(&sys->worker_interlock);
 
 	mutex_enter(&sys->user_cbs_lock);
@@ -3126,6 +3236,8 @@ elec_sys_worker(void *userinfo)
 	mutex_exit(&sys->user_cbs_lock);
 
 	mutex_exit(&sys->worker_interlock);
+
+	elec_net_send_update(sys);
 
 	return (true);
 }
@@ -3456,4 +3568,428 @@ libelec_phys_get_batt_voltage(double U_nominal, double chg_rel, double I_rel)
 	I_rel = clamp(I_rel, 0, 1);
 	return (U_nominal * (1 - clamp(pow(I_rel, 1.45), 0, 1)) *
 	    fx_lin_multi(chg_rel, chg_volt_curve, true));
+}
+
+static void
+kill_conn(elec_sys_t *sys, net_conn_t *conn)
+{
+	ASSERT(sys != NULL);
+	ASSERT_MUTEX_HELD(&sys->worker_interlock);
+	ASSERT(conn != NULL);
+
+	list_remove(&sys->net_send.conns_list, conn);
+	htbl_remove(&sys->net_send.conns, &conn->pipe, false);
+
+	free(conn->map);
+	ZERO_FREE(conn);
+}
+
+static void
+pipe_conn_notif(nng_pipe pipe, nng_pipe_ev ev, void *userinfo)
+{
+	elec_sys_t *sys;
+
+	UNUSED(pipe);
+	UNUSED(ev);
+	ASSERT(userinfo != NULL);
+	sys = userinfo;
+
+	mutex_enter(&sys->worker_interlock);
+	if (sys->net_recv.active && sys->started)
+		send_net_recv_map(sys);
+	mutex_exit(&sys->worker_interlock);
+}
+
+static void
+pipe_discon_notif(nng_pipe pipe, nng_pipe_ev ev, void *userinfo)
+{
+	elec_sys_t *sys;
+	net_conn_t *conn;
+
+	UNUSED(ev);
+	ASSERT(userinfo != NULL);
+	sys = userinfo;
+
+	mutex_enter(&sys->worker_interlock);
+	conn = htbl_lookup(&sys->net_send.conns, &pipe);
+	if (conn != NULL)
+		kill_conn(sys, conn);
+	mutex_exit(&sys->worker_interlock);
+}
+
+void
+libelec_enable_net_send(elec_sys_t *sys)
+{
+	ASSERT(sys != NULL);
+	ASSERT(!sys->started);
+	ASSERT(!sys->net_send.active);
+	ASSERT(!sys->net_recv.active);
+
+	sys->net_send.active = true;
+	sys->net_send.xmit_ctr = 0;
+	htbl_create(&sys->net_send.conns, 128, sizeof (nng_pipe), false);
+	list_create(&sys->net_send.conns_list, sizeof (net_conn_t),
+	    offsetof(net_conn_t, node));
+
+	sys->net_send.proto.proto_id = NETLINK_PROTO_LIBELEC;
+	sys->net_send.proto.name = "libelec";
+	sys->net_send.proto.msg_rcvd_notif = netlink_send_msg_notif;
+	sys->net_send.proto.pipe_rem_post_notif = pipe_discon_notif;
+	sys->net_send.proto.userinfo = sys;
+	netlink_add_proto(&sys->net_send.proto);
+}
+
+static void
+net_conn_free(void *net_conn, void *unused)
+{
+	net_conn_t *nc;
+
+	ASSERT(net_conn != NULL);
+	nc = net_conn;
+	UNUSED(unused);
+	free(nc->map);
+	ZERO_FREE(nc);
+}
+
+void
+libelec_disable_net_send(elec_sys_t *sys)
+{
+	ASSERT(sys != NULL);
+	ASSERT(!sys->started);
+
+	if (sys->net_send.active) {
+		netlink_remove_proto(&sys->net_send.proto);
+		while (list_remove_head(&sys->net_send.conns_list) != NULL)
+			;
+		list_destroy(&sys->net_send.conns_list);
+		htbl_empty(&sys->net_send.conns, net_conn_free, NULL);
+		htbl_destroy(&sys->net_send.conns);
+		sys->net_send.active = false;
+	}
+}
+
+void
+libelec_enable_net_recv(elec_sys_t *sys)
+{
+	ASSERT(sys != NULL);
+	ASSERT(!sys->started);
+	ASSERT(!sys->net_send.active);
+	ASSERT(!sys->net_recv.active);
+
+	sys->net_recv.map = safe_calloc(NETMAPSZ(sys),
+	    sizeof (*sys->net_recv.map));
+	sys->net_recv.map_dirty = false;
+	sys->net_recv.active = true;
+
+	sys->net_recv.proto.proto_id = NETLINK_PROTO_LIBELEC;
+	sys->net_recv.proto.name = "libelec";
+	sys->net_recv.proto.msg_rcvd_notif = netlink_recv_msg_notif;
+	sys->net_recv.proto.pipe_add_post_notif = pipe_conn_notif;
+	sys->net_recv.proto.userinfo = sys;
+
+	netlink_add_proto(&sys->net_recv.proto);
+}
+
+void
+libelec_disable_net_recv(elec_sys_t *sys)
+{
+	ASSERT(sys != NULL);
+	ASSERT(!sys->started);
+	if (sys->net_recv.active) {
+		netlink_remove_proto(&sys->net_recv.proto);
+		free(sys->net_recv.map);
+		sys->net_recv.map = NULL;
+		sys->net_recv.active = false;
+	}
+}
+
+static net_conn_t *
+get_net_conn(elec_sys_t *sys, nng_pipe pipe)
+{
+	net_conn_t *conn;
+
+	ASSERT(sys != NULL);
+	ASSERT_MUTEX_HELD(&sys->worker_interlock);
+
+	conn = htbl_lookup(&sys->net_send.conns, &pipe);
+	if (conn == NULL) {
+		conn = safe_calloc(1, sizeof (*conn));
+		conn->pipe = pipe;
+		conn->map = safe_calloc(NETMAPSZ(sys), sizeof (*conn->map));
+		delay_line_init(&conn->kill_delay, SEC2USEC(20));
+		htbl_set(&sys->net_send.conns, &pipe, conn);
+		list_insert_tail(&sys->net_send.conns_list, conn);
+	}
+
+	return (conn);
+}
+
+static void
+handle_net_req_map(elec_sys_t *sys, net_conn_t *conn, const net_req_map_t *req)
+{
+	ASSERT(sys != NULL);
+	ASSERT(conn != NULL);
+	ASSERT(req != NULL);
+
+	memcpy(conn->map, req->map, NETMAPSZ(sys));
+	conn->num_active = 0;
+	for (unsigned i = 0, n = list_count(&sys->comps); i < n; i++) {
+		if (NETMAPGET(conn->map, i))
+			conn->num_active++;
+	}
+	DELAY_LINE_PUSH_IMM(&conn->kill_delay, false);
+}
+
+static void
+netlink_send_msg_notif(nng_pipe pipe, const void *buf, size_t sz,
+    void *userinfo)
+{
+	elec_sys_t *sys;
+	const net_req_t *req;
+	net_conn_t *conn;
+
+	ASSERT(buf != NULL);
+	ASSERT(userinfo != NULL);
+	sys = userinfo;
+
+	if (sz < sizeof (net_req_t)) {
+		logMsg("Received bad packet length %d", (int)sz);
+		return;
+	}
+	req = buf;
+	if (req->version != LIBELEC_NET_VERSION) {
+		logMsg("Received bad version %d which doesn't match ours (%d)",
+		    req->version, LIBELEC_NET_VERSION);
+		return;
+	}
+	mutex_enter(&sys->worker_interlock);
+	conn = get_net_conn(sys, pipe);
+	if (req->req == NET_REQ_MAP) {
+		const net_req_map_t *map = buf;
+
+		if (map->conf_crc == sys->conf_crc &&
+		    sz == sizeof (net_req_map_t) + NETMAPSZ(sys)) {
+			handle_net_req_map(sys, conn, buf);
+		} else {
+#if	!IBM
+			logMsg("Cannot handle net map req, elec file "
+			    "CRC mismatch (ours: %llx theirs: %llx)",
+			    (unsigned long long)sys->conf_crc,
+			    (unsigned long long)map->conf_crc);
+#else	/* IBM */
+			logMsg("Cannot handle net map req, elec file "
+			    "CRC mismatch");
+#endif	/* IBM */
+		}
+	} else {
+		logMsg("Unknown or malformed req %x of length %d",
+		    req->req, (int)sz);
+	}
+	mutex_exit(&sys->worker_interlock);
+}
+
+static void
+send_xmit_data_conn(elec_sys_t *sys, net_conn_t *conn)
+{
+	size_t repsz;
+	net_rep_comps_t *rep;
+
+	ASSERT(sys != NULL);
+	ASSERT_MUTEX_HELD(&sys->worker_interlock);
+	ASSERT(conn != NULL);
+
+	repsz = sizeof (net_rep_comps_t) +
+	    conn->num_active * sizeof (net_comp_data_t);
+	rep = safe_calloc(1, repsz);
+	rep->version = LIBELEC_NET_VERSION;
+	rep->rep = NET_REP_COMPS;
+	rep->conf_crc = sys->conf_crc;
+	for (unsigned i = 0, n = list_count(&sys->comps); i < n; i++) {
+		const elec_comp_t *comp = sys->comps_array[i];
+
+		if (NETMAPGET(conn->map, i)) {
+			net_comp_data_t *data = &rep->comps[rep->n_comps++];
+			ASSERT3U(rep->n_comps, <=, conn->num_active);
+
+			data->idx = i;
+
+			if (comp->ro.failed)
+				data->flags |= LIBELEC_NET_FLAG_FAILED;
+			if (comp->ro.shorted)
+				data->flags |= LIBELEC_NET_FLAG_SHORTED;
+			data->in_volts = clampi(round(comp->ro.in_volts *
+			    NET_VOLTS_FACTOR), 0, UINT16_MAX);
+			data->out_volts = clampi(round(comp->ro.out_volts *
+			    NET_VOLTS_FACTOR), 0, UINT16_MAX);
+			data->in_amps = clampi(round(comp->ro.in_amps *
+			    NET_AMPS_FACTOR), 0, UINT16_MAX);
+			data->out_amps = clampi(round(comp->ro.out_amps *
+			    NET_AMPS_FACTOR), 0, UINT16_MAX);
+			data->in_freq = clampi(round(comp->ro.in_freq *
+			    NET_FREQ_FACTOR), 0, UINT16_MAX);
+			data->out_freq = clampi(round(comp->ro.out_freq *
+			    NET_FREQ_FACTOR), 0, UINT16_MAX);
+			data->leak_factor = round(comp->ro.leak_factor * 10000);
+		}
+	}
+	ASSERT3U(rep->n_comps, ==, conn->num_active);
+	(void)netlink_sendto(NETLINK_PROTO_LIBELEC, rep, repsz, conn->pipe,
+	    NNG_FLAG_NONBLOCK);
+}
+
+static void
+elec_net_send_update(elec_sys_t *sys)
+{
+	ASSERT(sys != NULL);
+
+	sys->net_send.xmit_ctr = (sys->net_send.xmit_ctr + 1) % NET_XMIT_INTVAL;
+	if (sys->net_send.xmit_ctr != 0)
+		return;
+	/*
+	 * Sending data can kill the conn and remove it from the list,
+	 * so be sure to grab the next conn pointer ahead of time.
+	 */
+	mutex_enter(&sys->worker_interlock);
+	for (net_conn_t *conn = list_head(&sys->net_send.conns_list),
+	    *next_conn = NULL; conn != NULL; conn = next_conn) {
+		next_conn = list_next(&sys->net_send.conns_list, conn);
+		send_xmit_data_conn(sys, conn);
+	}
+	mutex_exit(&sys->worker_interlock);
+}
+
+static void
+handle_net_rep_comps(elec_sys_t *sys, const net_rep_comps_t *comps)
+{
+	ASSERT(sys != NULL);
+	ASSERT(comps != NULL);
+
+	NET_DBG_LOG("New dev data with %d comps", (int)comps->n_comps);
+
+	for (unsigned i = 0; i < comps->n_comps; i++) {
+		const net_comp_data_t *data = &comps->comps[i];
+		elec_comp_t *comp;
+
+		if (data->idx >= list_count(&sys->comps))
+			continue;
+		comp = sys->comps_array[data->idx];
+
+		mutex_enter(&comp->rw_ro_lock);
+
+		comp->rw.in_volts = (data->in_volts / NET_VOLTS_FACTOR);
+		comp->rw.out_volts = (data->out_volts / NET_VOLTS_FACTOR);
+		comp->rw.in_amps = (data->in_amps / NET_AMPS_FACTOR);
+		comp->rw.out_amps = (data->out_amps / NET_AMPS_FACTOR);
+		comp->rw.in_pwr = comp->rw.in_volts * comp->rw.in_amps;
+		comp->rw.out_pwr = comp->rw.out_volts * comp->rw.out_amps;
+		comp->rw.in_freq = (data->in_freq / NET_FREQ_FACTOR);
+		comp->rw.out_freq = (data->out_freq / NET_FREQ_FACTOR);
+		comp->rw.leak_factor = (data->leak_factor / 10000.0);
+		comp->rw.failed = !!(data->flags & LIBELEC_NET_FLAG_FAILED);
+		comp->rw.shorted = !!(data->flags & LIBELEC_NET_FLAG_SHORTED);
+
+		comp->ro = comp->rw;
+
+		mutex_exit(&comp->rw_ro_lock);
+	}
+}
+
+static void
+netlink_recv_msg_notif(nng_pipe pipe, const void *buf, size_t sz,
+    void *userinfo)
+{
+	elec_sys_t *sys;
+	const net_rep_t *rep;
+	const net_rep_comps_t *rep_comps;
+
+	UNUSED(pipe);
+	ASSERT(buf != NULL);
+	rep = buf;
+	rep_comps = buf;
+	ASSERT(userinfo != NULL);
+	sys = userinfo;
+
+	if (sz < sizeof (net_rep_t)) {
+		logMsg("Received bad packet length %d", (int)sz);
+		return;
+	}
+	if (rep->version != LIBELEC_NET_VERSION) {
+		logMsg("Received bad version %d which doesn't "
+		    "match ours (%d)", rep->version, LIBELEC_NET_VERSION);
+		return;
+	}
+	if (rep->rep == NET_REP_COMPS &&
+	    sz >= sizeof (net_rep_comps_t) &&
+	    sz == sizeof (net_rep_comps_t) + rep_comps->n_comps *
+	    sizeof (net_comp_data_t)) {
+		if (rep_comps->conf_crc == sys->conf_crc) {
+			handle_net_rep_comps(sys, rep_comps);
+		} else {
+#if	!IBM
+			logMsg("Cannot handle rep COMPS, elec file "
+			    "CRC mismatch (ours: %llx theirs: %llx)",
+			    (unsigned long long)sys->conf_crc,
+			    (unsigned long long)rep_comps->conf_crc);
+#else	/* IBM */
+			logMsg("Cannot handle rep COMPS, elec file "
+			    "CRC mismatch");
+#endif	/* IBM */
+		}
+	} else {
+		logMsg("Unknown or malformed rep %x of length %d",
+		    rep->rep, (int)sz);
+	}
+}
+
+static void
+elec_net_recv_update(elec_sys_t *sys)
+{
+	ASSERT(sys != NULL);
+	if (netlink_started() && sys->net_recv.map_dirty) {
+		mutex_enter(&sys->worker_interlock);
+		if (send_net_recv_map(sys))
+			sys->net_recv.map_dirty = false;
+		mutex_exit(&sys->worker_interlock);
+	}
+}
+
+static bool
+send_net_recv_map(elec_sys_t *sys)
+{
+	net_req_map_t *req;
+	bool res;
+
+	ASSERT(sys != NULL);
+	ASSERT(sys->started);
+	ASSERT(sys->net_recv.active);
+	req = safe_calloc(1, NETMAPSZ_REQ(sys));
+	req->version = LIBELEC_NET_VERSION;
+	req->req = NET_REQ_MAP;
+	req->conf_crc = sys->conf_crc;
+	memcpy(req->map, sys->net_recv.map, NETMAPSZ(sys));
+	res = netlink_send(NETLINK_PROTO_LIBELEC, req, NETMAPSZ_REQ(sys),
+	    NNG_FLAG_NONBLOCK);
+	ZERO_FREE(req);
+
+	return (res);
+}
+
+static void
+net_add_recv_comp(elec_comp_t *comp)
+{
+	elec_sys_t *sys;
+
+	ASSERT(comp != NULL);
+	sys = comp->sys;
+	if (!sys->net_recv.active)
+		return;
+	ASSERT3U(comp->comp_idx, <, list_count(&sys->comps));
+	if (!NETMAPGET(sys->net_recv.map, comp->comp_idx)) {
+		mutex_enter(&sys->worker_interlock);
+		if (!NETMAPGET(sys->net_recv.map, comp->comp_idx)) {
+			NETMAPSET(sys->net_recv.map, comp->comp_idx);
+			sys->net_recv.map_dirty = true;
+		}
+		mutex_exit(&sys->worker_interlock);
+	}
 }

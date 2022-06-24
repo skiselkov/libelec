@@ -1,7 +1,7 @@
 /*
  * CONFIDENTIAL
  *
- * Copyright 2019 Saso Kiselkov. All rights reserved.
+ * Copyright 2022 Saso Kiselkov. All rights reserved.
  *
  * NOTICE:  All information contained herein is, and remains the property
  * of Saso Kiselkov. The intellectual and technical concepts contained
@@ -40,8 +40,6 @@ typedef struct {
 } load_info_t;
 
 static elec_sys_t *sys = NULL;
-static elec_comp_info_t *infos = NULL;
-static size_t num_infos = 0;
 static avl_tree_t load_infos;
 
 static double get_gen_rpm(elec_comp_t *comp);
@@ -85,7 +83,8 @@ load_info_compar(const void *a, const void *b)
 static void
 print_usage(FILE *fp, const char *progname)
 {
-	fprintf(fp, "Usage: %s [-h] <elec_file>\n", progname);
+	fprintf(fp, "Usage: %s [-h] <elec_file> [-s <url>|-r <url>]\n",
+	    progname);
 }
 
 static void
@@ -97,6 +96,8 @@ debug_print(const char *str)
 static elec_comp_info_t *
 name2info(const char *name)
 {
+	size_t num_infos;
+	elec_comp_info_t *infos = libelec_get_comp_infos(sys, &num_infos);
 	for (size_t i = 0; i < num_infos; i++) {
 		if (strcmp(name, infos[i].name) == 0)
 			return (&infos[i]);
@@ -413,6 +414,7 @@ main(int argc, char **argv)
 	char cmd[32];
 	void *cookie;
 	load_info_t *load_info;
+	const char *send_url = NULL, *recv_url = NULL;
 
 	crc64_init();
 	crc64_srand(0);
@@ -421,11 +423,25 @@ main(int argc, char **argv)
 	avl_create(&load_infos, load_info_compar, sizeof (load_info_t),
 	    offsetof(load_info_t, node));
 
-	while ((opt = getopt(argc, argv, "h")) != -1) {
+	while ((opt = getopt(argc, argv, "hs:r:")) != -1) {
 		switch (opt) {
 		case 'h':
 			print_usage(stdout, argv[0]);
 			exit(EXIT_SUCCESS);
+		case 's':
+			if (recv_url != NULL) {
+				logMsg("-s and -r are mutually exclusive");
+				exit(EXIT_FAILURE);
+			}
+			send_url = optarg;
+			break;
+		case 'r':
+			if (send_url != NULL) {
+				logMsg("-s and -r are mutually exclusive");
+				exit(EXIT_FAILURE);
+			}
+			recv_url = optarg;
+			break;
 		default: /* '?' */
 			print_usage(stderr, argv[0]);
 			exit(EXIT_FAILURE);
@@ -433,15 +449,17 @@ main(int argc, char **argv)
 	}
 	if (optind + 1 > argc) {
 		print_usage(stderr, argv[0]);
-		return (1);
+		exit(EXIT_FAILURE);
 	}
 	filename = argv[optind++];
 
-	infos = libelec_infos_parse(filename, binds, &num_infos);
-	if (num_infos == 0)
-		return (1);
-	sys = libelec_new(infos, num_infos);
-	ASSERT(sys != NULL);
+	sys = libelec_new(filename, binds);
+	if (sys == NULL)
+		exit(EXIT_FAILURE);
+	if (send_url != NULL)
+		libelec_enable_net_send(sys, send_url);
+	if (recv_url != NULL)
+		libelec_enable_net_recv(sys, recv_url);
 	libelec_sys_start(sys);
 
 	for (;;) {
@@ -483,7 +501,6 @@ main(int argc, char **argv)
 
 	libelec_sys_stop(sys);
 	libelec_destroy(sys);
-	libelec_parsed_info_free(infos, num_infos);
 
 	cookie = NULL;
 	while ((load_info = avl_destroy_nodes(&load_infos, &cookie)) != NULL)

@@ -18,6 +18,8 @@
 #include <stdarg.h>
 #include <stdbool.h>
 
+#include <netlink.h>
+
 #include <acfutils/conf.h>
 #include <acfutils/geom.h>
 #include <acfutils/sysmacros.h>
@@ -160,8 +162,11 @@ typedef struct {
 
 typedef void (*elec_user_cb_t)(elec_sys_t *sys, bool pre, void *userinfo);
 
-elec_sys_t *libelec_new(elec_comp_info_t *comp_infos, size_t num_infos);
+elec_sys_t *libelec_new(const char *filename, const elec_func_bind_t *binds);
 void libelec_destroy(elec_sys_t *sys);
+
+elec_comp_info_t *libelec_get_comp_infos(const elec_sys_t *sys,
+    size_t *num_infos);
 
 void libelec_sys_start(elec_sys_t *sys);
 void libelec_sys_stop(elec_sys_t *sys);
@@ -169,6 +174,11 @@ void libelec_sys_stop(elec_sys_t *sys);
 void libelec_serialize(elec_sys_t *sys, conf_t *ser, const char *prefix);
 bool libelec_deserialize(elec_sys_t *sys, const conf_t *ser,
     const char *prefix);
+
+void libelec_enable_net_send(elec_sys_t *sys);
+void libelec_disable_net_send(elec_sys_t *sys);
+void libelec_enable_net_recv(elec_sys_t *sys);
+void libelec_disable_net_recv(elec_sys_t *sys);
 
 #ifndef	LIBELEC_NO_LIBSWITCH
 void libelec_create_cb_switches(const elec_sys_t *sys, const char *prefix,
@@ -178,10 +188,6 @@ void libelec_create_cb_switches(const elec_sys_t *sys, const char *prefix,
 #ifdef	LIBELEC_SLOW_DEBUG
 void libelec_step(elec_sys_t *sys);
 #endif
-
-elec_comp_info_t *libelec_infos_parse(const char *filename,
-    const elec_func_bind_t *binds, size_t *num_infos);
-void libelec_parsed_info_free(elec_comp_info_t *infos, size_t num_infos);
 
 void libelec_add_user_cb(elec_sys_t *sys, bool pre, elec_user_cb_t cb,
     void *userinfo);
