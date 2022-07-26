@@ -17,11 +17,10 @@
 
 #include <stdint.h>
 
-#include <nng/nng.h>
-#include <nng/protocol/pair0/pair.h>
-
 #include <acfutils/delay_line.h>
 #include <acfutils/list.h>
+
+#include <netlink.h>
 
 #ifdef	__cplusplus
 extern "C" {

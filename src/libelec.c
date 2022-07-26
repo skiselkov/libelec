@@ -36,6 +36,7 @@
 #endif
 
 #include <abus_ser.h>
+#include <netlink.h>
 
 #include "libelec.h"
 #include "libelec_types_impl.h"
@@ -3076,83 +3077,6 @@ network_trace(const elec_comp_t *upstream, const elec_comp_t *comp,
 	return (load_trace);
 }
 
-#ifdef	XXX
-static void
-network_integrity_check(elec_sys_t *sys)
-{
-	/*
-	 * E_out - the amount of energy exiting the network
-	 * E_in - the amount of energy entering the network
-	 * Loads (& shorted buses) only add to E_out. Generators
-	 * only add to E_in. TRUs and batteries add to both.
-	 */
-	double E_out = 0, E_in = 0;
-
-	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
-	    comp = list_next(&sys->comps, comp)) {
-		if (comp->info->type == ELEC_LOAD) {
-			if (comp->src != NULL) {
-				if (!comp->rw.failed) {
-					ASSERT3F(comp->rw.in_volts, ==,
-					    comp->src->rw.out_volts);
-					ASSERT3F(comp->rw.in_freq, ==,
-					    comp->src->rw.out_freq);
-				}
-			} else {
-				ASSERT0(comp->rw.in_volts);
-				ASSERT0(comp->rw.in_freq);
-			}
-			E_out += comp->rw.in_volts * comp->rw.in_amps;
-		} else if (comp->info->type == ELEC_TRU) {
-			E_out += comp->rw.in_volts * comp->rw.in_amps;
-			E_in += comp->rw.out_volts * comp->rw.out_amps;
-		} else if (comp->info->type == ELEC_GEN) {
-			E_in += comp->rw.out_volts * comp->rw.out_amps;
-		} else if (comp->info->type == ELEC_BATT) {
-			E_in += comp->rw.out_volts * comp->rw.out_amps;
-			E_out += comp->rw.in_volts * comp->rw.in_amps;
-		} else if (comp->info->type == ELEC_BUS) {
-			/* A short circuit is a simple power consumer */
-			E_out += comp->rw.out_volts * comp->rw.short_amps;
-		}
-	}
-	if (ABS(E_out - E_in) >= 1e-3) {
-		for (elec_comp_t *src = list_head(&sys->comps); src != NULL;
-		    src = list_next(&sys->comps, src)) {
-			double W_in = 0, W_out = 0;
-			if (src->info->type != ELEC_TRU &&
-			    src->info->type != ELEC_BATT &&
-			    src->info->type != ELEC_GEN) {
-				continue;
-			}
-			for (elec_comp_t *load = list_head(&sys->comps);
-			    load != NULL; load = list_next(&sys->comps, load)) {
-				if (load->src != src)
-					continue;
-				if (load->info->type == ELEC_LOAD ||
-				    load->info->type == ELEC_TRU ||
-				    load->info->type == ELEC_BATT) {
-					W_out += load->rw.in_volts *
-					    load->rw.in_amps;
-				} else if (load->info->type == ELEC_BUS) {
-					W_out += load->rw.in_volts *
-					    load->rw.short_amps;
-				}
-			}
-			W_in = src->rw.out_volts * src->rw.out_amps;
-			if (ABS(W_out - W_in) > 1e-3) {
-				logMsg("Overflow src %s, input %.2fW, output "
-				    "%.2fW, trace:",
-				    src->info->name, W_in, W_out);
-				network_trace(src, src, 0, true);
-				VERIFY_FAIL();
-			}
-		}
-		VERIFY_FAIL();
-	}
-}
-#endif
-
 static bool_t
 elec_sys_worker(void *userinfo)
 {
@@ -3216,9 +3140,6 @@ elec_sys_worker(void *userinfo)
 	network_load_integrate(sys, d_t);
 	network_loads_update(sys, d_t);
 	network_ties_update(sys);
-#ifdef	XXX
-	network_integrity_check(sys);
-#endif
 	/*
 	 * Must occur AFTER the integrity check! network_state_xfer touches
 	 * the rw state and syncs it to the ro state.
@@ -3834,7 +3755,7 @@ send_xmit_data_conn(elec_sys_t *sys, net_conn_t *conn)
 	}
 	ASSERT3U(rep->n_comps, ==, conn->num_active);
 	(void)netlink_sendto(NETLINK_PROTO_LIBELEC, rep, repsz, conn->pipe,
-	    NNG_FLAG_NONBLOCK);
+	    NETLINK_FLAG_NONBLOCK);
 }
 
 static void
@@ -3968,7 +3889,7 @@ send_net_recv_map(elec_sys_t *sys)
 	req->conf_crc = sys->conf_crc;
 	memcpy(req->map, sys->net_recv.map, NETMAPSZ(sys));
 	res = netlink_send(NETLINK_PROTO_LIBELEC, req, NETMAPSZ_REQ(sys),
-	    NNG_FLAG_NONBLOCK);
+	    NETLINK_FLAG_NONBLOCK);
 	ZERO_FREE(req);
 
 	return (res);
