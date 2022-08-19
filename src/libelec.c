@@ -2490,7 +2490,7 @@ network_load_integrate_tru(const elec_comp_t *src, const elec_comp_t *upstream,
 	comp->tru.prev_amps = comp->rw.out_amps;
 	comp->tru.eff = fx_lin_multi(comp->rw.out_volts * comp->rw.out_amps,
 	    comp->info->tru.eff_curve, true);
-	ASSERT3F(comp->tru.eff, >=, 0);
+	ASSERT3F(comp->tru.eff, >, 0);
 	ASSERT3F(comp->tru.eff, <, 1);
 	comp->rw.in_amps = ((comp->rw.out_volts / comp->rw.in_volts) *
 	    comp->rw.out_amps) / comp->tru.eff;
