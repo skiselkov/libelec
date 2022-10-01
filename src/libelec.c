@@ -2327,8 +2327,10 @@ network_paint_src_tru(elec_comp_t *src, elec_comp_t *upstream,
 		/*
 		 * The TRU becomes the source for downstream buses.
 		 */
-		network_paint_src_comp(comp, comp, comp->links[1].comp,
-		    depth + 1);
+		if (comp->rw.out_volts != 0) {
+			network_paint_src_comp(comp, comp,
+			    comp->links[1].comp, depth + 1);
+		}
 	}
 }
 
