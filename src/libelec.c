@@ -1835,7 +1835,7 @@ update_short_leak_factor(elec_comp_t *comp, double d_t)
 				comp->rw.leak_factor = 0;
 		} else {
 			comp->rw.leak_factor =
-			    wavg(0.9, 0.99, crc64_rand_fract());
+			    wavg(0.97, 0.975, crc64_rand_fract());
 		}
 	} else {
 		comp->rw.leak_factor = 0;
