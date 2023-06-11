@@ -1,7 +1,7 @@
 /*
  * CONFIDENTIAL
  *
- * Copyright 2022 Saso Kiselkov. All rights reserved.
+ * Copyright 2023 Saso Kiselkov. All rights reserved.
  *
  * NOTICE:  All information contained herein is, and remains the property
  * of Saso Kiselkov. The intellectual and technical concepts contained
@@ -110,9 +110,9 @@ static double network_load_integrate_load(const elec_comp_t *src,
 static double network_trace(const elec_comp_t *upstream,
     const elec_comp_t *comp, unsigned depth, bool do_print);
 
-static void netlink_send_msg_notif(nng_pipe pipe, const void *buf,
+static void netlink_send_msg_notif(netlink_conn_id_t conn_id, const void *buf,
     size_t bufsz, void *userinfo);
-static void netlink_recv_msg_notif(nng_pipe pipe, const void *buf,
+static void netlink_recv_msg_notif(netlink_conn_id_t conn_id, const void *buf,
     size_t bufsz, void *userinfo);
 
 static void elec_net_send_update(elec_sys_t *sys);
@@ -3501,18 +3501,18 @@ kill_conn(elec_sys_t *sys, net_conn_t *conn)
 	ASSERT(conn != NULL);
 
 	list_remove(&sys->net_send.conns_list, conn);
-	htbl_remove(&sys->net_send.conns, &conn->pipe, false);
+	htbl_remove(&sys->net_send.conns, &conn->conn_id, false);
 
 	free(conn->map);
 	ZERO_FREE(conn);
 }
 
 static void
-pipe_conn_notif(nng_pipe pipe, nng_pipe_ev ev, void *userinfo)
+conn_add_notif(netlink_conn_id_t conn_id, netlink_conn_ev_t ev, void *userinfo)
 {
 	elec_sys_t *sys;
 
-	UNUSED(pipe);
+	UNUSED(conn_id);
 	UNUSED(ev);
 	ASSERT(userinfo != NULL);
 	sys = userinfo;
@@ -3524,7 +3524,8 @@ pipe_conn_notif(nng_pipe pipe, nng_pipe_ev ev, void *userinfo)
 }
 
 static void
-pipe_discon_notif(nng_pipe pipe, nng_pipe_ev ev, void *userinfo)
+conn_rem_notif(netlink_conn_id_t conn_id, netlink_conn_ev_t ev,
+    void *userinfo)
 {
 	elec_sys_t *sys;
 	net_conn_t *conn;
@@ -3534,7 +3535,7 @@ pipe_discon_notif(nng_pipe pipe, nng_pipe_ev ev, void *userinfo)
 	sys = userinfo;
 
 	mutex_enter(&sys->worker_interlock);
-	conn = htbl_lookup(&sys->net_send.conns, &pipe);
+	conn = htbl_lookup(&sys->net_send.conns, &conn_id);
 	if (conn != NULL)
 		kill_conn(sys, conn);
 	mutex_exit(&sys->worker_interlock);
@@ -3550,14 +3551,15 @@ libelec_enable_net_send(elec_sys_t *sys)
 
 	sys->net_send.active = true;
 	sys->net_send.xmit_ctr = 0;
-	htbl_create(&sys->net_send.conns, 128, sizeof (nng_pipe), false);
+	htbl_create(&sys->net_send.conns, 128, sizeof (netlink_conn_id_t),
+	    false);
 	list_create(&sys->net_send.conns_list, sizeof (net_conn_t),
 	    offsetof(net_conn_t, node));
 
 	sys->net_send.proto.proto_id = NETLINK_PROTO_LIBELEC;
 	sys->net_send.proto.name = "libelec";
 	sys->net_send.proto.msg_rcvd_notif = netlink_send_msg_notif;
-	sys->net_send.proto.pipe_rem_post_notif = pipe_discon_notif;
+	sys->net_send.proto.conn_rem_notif = conn_rem_notif;
 	sys->net_send.proto.userinfo = sys;
 	netlink_add_proto(&sys->net_send.proto);
 }
@@ -3607,7 +3609,7 @@ libelec_enable_net_recv(elec_sys_t *sys)
 	sys->net_recv.proto.proto_id = NETLINK_PROTO_LIBELEC;
 	sys->net_recv.proto.name = "libelec";
 	sys->net_recv.proto.msg_rcvd_notif = netlink_recv_msg_notif;
-	sys->net_recv.proto.pipe_add_post_notif = pipe_conn_notif;
+	sys->net_recv.proto.conn_add_notif = conn_add_notif;
 	sys->net_recv.proto.userinfo = sys;
 
 	netlink_add_proto(&sys->net_recv.proto);
@@ -3627,20 +3629,20 @@ libelec_disable_net_recv(elec_sys_t *sys)
 }
 
 static net_conn_t *
-get_net_conn(elec_sys_t *sys, nng_pipe pipe)
+get_net_conn(elec_sys_t *sys, netlink_conn_id_t conn_id)
 {
 	net_conn_t *conn;
 
 	ASSERT(sys != NULL);
 	ASSERT_MUTEX_HELD(&sys->worker_interlock);
 
-	conn = htbl_lookup(&sys->net_send.conns, &pipe);
+	conn = htbl_lookup(&sys->net_send.conns, &conn_id);
 	if (conn == NULL) {
 		conn = safe_calloc(1, sizeof (*conn));
-		conn->pipe = pipe;
+		conn->conn_id = conn_id;
 		conn->map = safe_calloc(NETMAPSZ(sys), sizeof (*conn->map));
 		delay_line_init(&conn->kill_delay, SEC2USEC(20));
-		htbl_set(&sys->net_send.conns, &pipe, conn);
+		htbl_set(&sys->net_send.conns, &conn_id, conn);
 		list_insert_tail(&sys->net_send.conns_list, conn);
 	}
 
@@ -3664,7 +3666,7 @@ handle_net_req_map(elec_sys_t *sys, net_conn_t *conn, const net_req_map_t *req)
 }
 
 static void
-netlink_send_msg_notif(nng_pipe pipe, const void *buf, size_t sz,
+netlink_send_msg_notif(netlink_conn_id_t conn_id, const void *buf, size_t sz,
     void *userinfo)
 {
 	elec_sys_t *sys;
@@ -3686,7 +3688,7 @@ netlink_send_msg_notif(nng_pipe pipe, const void *buf, size_t sz,
 		return;
 	}
 	mutex_enter(&sys->worker_interlock);
-	conn = get_net_conn(sys, pipe);
+	conn = get_net_conn(sys, conn_id);
 	if (req->req == NET_REQ_MAP) {
 		const net_req_map_t *map = buf;
 
@@ -3756,8 +3758,8 @@ send_xmit_data_conn(elec_sys_t *sys, net_conn_t *conn)
 		}
 	}
 	ASSERT3U(rep->n_comps, ==, conn->num_active);
-	(void)netlink_sendto(NETLINK_PROTO_LIBELEC, rep, repsz, conn->pipe,
-	    NETLINK_FLAG_NONBLOCK);
+	(void)netlink_sendto(NETLINK_PROTO_LIBELEC, rep, repsz,
+	    conn->conn_id, 0);
 }
 
 static void
@@ -3818,14 +3820,14 @@ handle_net_rep_comps(elec_sys_t *sys, const net_rep_comps_t *comps)
 }
 
 static void
-netlink_recv_msg_notif(nng_pipe pipe, const void *buf, size_t sz,
+netlink_recv_msg_notif(netlink_conn_id_t conn_id, const void *buf, size_t sz,
     void *userinfo)
 {
 	elec_sys_t *sys;
 	const net_rep_t *rep;
 	const net_rep_comps_t *rep_comps;
 
-	UNUSED(pipe);
+	UNUSED(conn_id);
 	ASSERT(buf != NULL);
 	rep = buf;
 	rep_comps = buf;
@@ -3890,8 +3892,7 @@ send_net_recv_map(elec_sys_t *sys)
 	req->req = NET_REQ_MAP;
 	req->conf_crc = sys->conf_crc;
 	memcpy(req->map, sys->net_recv.map, NETMAPSZ(sys));
-	res = netlink_send(NETLINK_PROTO_LIBELEC, req, NETMAPSZ_REQ(sys),
-	    NETLINK_FLAG_NONBLOCK);
+	res = netlink_send(NETLINK_PROTO_LIBELEC, req, NETMAPSZ_REQ(sys), 0);
 	ZERO_FREE(req);
 
 	return (res);

@@ -1,7 +1,7 @@
 /*
  * CONFIDENTIAL
  *
- * Copyright 2022 Saso Kiselkov. All rights reserved.
+ * Copyright 2023 Saso Kiselkov. All rights reserved.
  *
  * NOTICE:  All information contained herein is, and remains the property
  * of Saso Kiselkov. The intellectual and technical concepts contained
@@ -27,7 +27,7 @@ extern "C" {
 #endif
 
 typedef struct {
-	nng_pipe		pipe;
+	netlink_conn_id_t	conn_id;
 	uint8_t			*map;	/* NETMAPSZ bytes */
 	unsigned		num_active;
 	delay_line_t		kill_delay;
