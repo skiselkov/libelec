@@ -1,15 +1,10 @@
 /*
- * CONFIDENTIAL
- *
- * Copyright 2018 Saso Kiselkov. All rights reserved.
- *
- * NOTICE:  All information contained herein is, and remains the property
- * of Saso Kiselkov. The intellectual and technical concepts contained
- * herein are proprietary to Saso Kiselkov and may be covered by U.S. and
- * Foreign Patents, patents in process, and are protected by trade secret
- * or copyright law. Dissemination of this information or reproduction of
- * this material is strictly forbidden unless prior written permission is
- * obtained from Saso Kiselkov.
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+/*
+ * Copyright 2023 Saso Kiselkov. All rights reserved.
  */
 
 #ifndef	_FILE_H_

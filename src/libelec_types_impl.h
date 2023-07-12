@@ -1,15 +1,10 @@
 /*
- * CONFIDENTIAL
- *
- * Copyright 2022 Saso Kiselkov. All rights reserved.
- *
- * NOTICE:  All information contained herein is, and remains the property
- * of Saso Kiselkov. The intellectual and technical concepts contained
- * herein are proprietary to Saso Kiselkov and may be covered by U.S. and
- * Foreign Patents, patents in process, and are protected by trade secret
- * or copyright law. Dissemination of this information or reproduction of
- * this material is strictly forbidden unless prior written permission is
- * obtained from Saso Kiselkov.
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+/*
+ * Copyright 2023 Saso Kiselkov. All rights reserved.
  */
 
 #ifndef	__LIBELEC_TYPES_IMPL_H__
@@ -23,18 +18,46 @@
 #include <acfutils/worker.h>
 #include <acfutils/thread.h>
 
-#include <abus_ser.h>
-#ifndef	LIBELEC_NO_LIBSWITCH
+#ifdef	LIBELEC_WITH_LIBSWITCH
 #include <libswitch.h>
 #endif
 
+#ifdef	LIBELEC_WITH_NETLINK
 #include "libelec_types_net.h"
+#endif
 
 #include "libelec.h"
 
 #ifdef	__cplusplus
 extern "C" {
 #endif
+
+#define	LIBELEC_SER_START_MARKER \
+	ALIGN_ATTR(16) int	__serialize_start_marker[1]
+#define	LIBELEC_SER_END_MARKER	\
+	int	__serialize_end_marker[1]
+#define	LIBELEC_SERIALIZE_DATA_V(data, ser, key, ...) \
+	conf_set_data_v((ser), (key), &(data)->__serialize_start_marker, \
+	    ((uintptr_t)&(data)->__serialize_end_marker) - \
+	    ((uintptr_t)&(data)->__serialize_start_marker), __VA_ARGS__)
+#define	LIBELEC_DESERIALIZE_DATA_V(data, ser, key, ...) \
+	do { \
+		size_t __len = ((uintptr_t)&(data)->__serialize_end_marker) - \
+		    ((uintptr_t)&(data)->__serialize_start_marker); \
+		void *tmpbuf = safe_malloc(__len); \
+		size_t __act_len = conf_get_data_v((ser), (key), tmpbuf, \
+		    __len, __VA_ARGS__); \
+		if (__act_len != __len) { \
+			logMsg("Error deserializing key " key ": " \
+			    "data length mismatch, wanted %d bytes, got %d", \
+			    __VA_ARGS__, (int)__len, (int)__act_len); \
+			free(tmpbuf); \
+			return (false); \
+		} \
+		memcpy(&(data)->__serialize_start_marker, tmpbuf, __len); \
+		free(tmpbuf); \
+	} while (0)
+
 
 #define	MAX_SRCS	24
 
@@ -57,6 +80,7 @@ struct elec_sys_s {
 	} drs;
 #endif	/* defined(XPLANE) */
 
+	char		*conf_filename;
 	uint64_t	conf_crc;
 
 	avl_tree_t	info2comp;
@@ -72,6 +96,7 @@ struct elec_sys_s {
 
 	elec_comp_info_t	*comp_infos;	/* immutable after parse */
 	size_t			num_infos;
+#ifdef	LIBELEC_WITH_NETLINK
 	struct {
 		bool		active;
 		/* protected by worker_interlock */
@@ -87,14 +112,15 @@ struct elec_sys_s {
 		bool		map_dirty;
 		netlink_proto_t	proto;
 	} net_recv;
+#endif	/* defined(LIBELEC_WITH_NETLINK) */
 };
 
 typedef struct {
-	SERIALIZE_START_MARKER;
+	LIBELEC_SER_START_MARKER;
 	double		prev_amps;
 	double		chg_rel;
 	double		rechg_W;
-	SERIALIZE_END_MARKER;
+	LIBELEC_SER_END_MARKER;
 	double		T;		/* Kelvin */
 } elec_batt_t;
 
@@ -106,27 +132,29 @@ typedef struct {
 	double		max_stab_f;
 	double		eff;
 	double		rpm;
-	SERIALIZE_START_MARKER;
+	LIBELEC_SER_START_MARKER;
+	double		tgt_volts;
+	double		tgt_freq;
 	double		stab_factor_U;
 	double		stab_factor_f;
-	SERIALIZE_END_MARKER;
+	LIBELEC_SER_END_MARKER;
 } elec_gen_t;
 
 typedef struct {
 	elec_comp_t	*batt;
 	elec_comp_t	*batt_conn;
 	double		prev_amps;
-	double		chgr_regul;
+	double		regul;
 	double		eff;
 } elec_tru_t;
 
 typedef struct {
 	elec_comp_t	*bus;
-	SERIALIZE_START_MARKER;
+	LIBELEC_SER_START_MARKER;
 	/* Virtual input capacitor voltage */
 	double		incap_U;
 	double		random_load_factor;
-	SERIALIZE_END_MARKER;
+	LIBELEC_SER_END_MARKER;
 	/* Change of input capacitor charge */
 	double		incap_d_Q;
 
@@ -134,14 +162,14 @@ typedef struct {
 } elec_load_t;
 
 typedef struct {
-#ifndef	LIBELEC_NO_LIBSWITCH
+#ifdef	LIBELEC_WITH_LIBSWITCH
 	switch_t	*sw;		/* optional libswitch link */
 #endif
-	SERIALIZE_START_MARKER;
+	LIBELEC_SER_START_MARKER;
 	bool_t		cur_set;
 	bool_t		wk_set;
 	double		temp;		/* relative 0.0 - 1.0 */
-	SERIALIZE_END_MARKER;
+	LIBELEC_SER_END_MARKER;
 } elec_scb_t;
 
 typedef struct {
@@ -183,7 +211,7 @@ struct elec_comp_s {
 
 	mutex_t			rw_ro_lock;
 
-	SERIALIZE_START_MARKER;
+	LIBELEC_SER_START_MARKER;
 	struct {
 		double		in_volts;
 		double		out_volts;
@@ -205,7 +233,7 @@ struct elec_comp_s {
 		bool		shorted;
 		double		leak_factor;
 	} rw, ro;
-	SERIALIZE_END_MARKER;
+	LIBELEC_SER_END_MARKER;
 
 	double			src_int_cond_total; /* Conductance, abstract */
 	uint64_t		src_mask;

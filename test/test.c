@@ -1,15 +1,10 @@
 /*
- * CONFIDENTIAL
- *
- * Copyright 2022 Saso Kiselkov. All rights reserved.
- *
- * NOTICE:  All information contained herein is, and remains the property
- * of Saso Kiselkov. The intellectual and technical concepts contained
- * herein are proprietary to Saso Kiselkov and may be covered by U.S. and
- * Foreign Patents, patents in process, and are protected by trade secret
- * or copyright law. Dissemination of this information or reproduction of
- * this material is strictly forbidden unless prior written permission is
- * obtained from Saso Kiselkov.
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+/*
+ * Copyright 2023 Saso Kiselkov. All rights reserved.
  */
 
 #include <stdio.h>
@@ -42,31 +37,9 @@ typedef struct {
 static elec_sys_t *sys = NULL;
 static avl_tree_t load_infos;
 
-static double get_gen_rpm(elec_comp_t *comp);
-static double get_batt_temp(elec_comp_t *comp);
-static double get_load(elec_comp_t *comp);
-
-static elec_func_bind_t binds[] = {
-    { "get_gen_rpm", get_gen_rpm },
-    { "get_batt_temp", get_batt_temp },
-    { "get_load", get_load },
-    { "gen_1", NULL },
-    { "gen_2", NULL },
-    { "apu_gen", NULL },
-    { "adg_gen", NULL },
-    { "ac_gen", NULL },
-    { "dc_gen", NULL },
-    { "main_batt", NULL },
-    { "apu_batt", NULL },
-    { "ac_bus_load_1", NULL },
-    { "ac_bus_load_2", NULL },
-    { "get_load_hyd", get_load },
-    { "get_load_adshc", get_load },
-    { "apu_get_fuel_pmp_load", get_load },
-    { "apu_get_ecu_load", get_load },
-    { "apu_get_starter_load", get_load },
-    { NULL, NULL }	/* list terminator */
-};
+static double get_gen_rpm(elec_comp_t *comp, void *userinfo);
+static double get_batt_temp(elec_comp_t *comp, void *userinfo);
+UNUSED_ATTR static double get_load(elec_comp_t *comp, void *userinfo);
 
 static int
 load_info_compar(const void *a, const void *b)
@@ -102,16 +75,6 @@ name2info(const char *name)
 		if (strcmp(name, infos[i].name) == 0)
 			return (&infos[i]);
 	}
-	return (NULL);
-}
-
-static elec_comp_t *
-name2comp(const char *name)
-{
-	elec_comp_info_t *info = name2info(name);
-
-	if (info != NULL)
-		return (libelec_info2comp(sys, info));
 	return (NULL);
 }
 
@@ -211,7 +174,8 @@ static void
 print_ties_i(elec_comp_t *comp, void *userinfo)
 {
 	const elec_comp_info_t *info = libelec_comp2info(comp);
-	elec_comp_t *bus_list[libelec_comp_get_num_conns(comp)];
+	size_t n_conns = libelec_comp_get_num_conns(comp);
+	elec_comp_t *bus_list[n_conns];
 	size_t n_tied;
 
 	UNUSED(userinfo);
@@ -221,7 +185,7 @@ print_ties_i(elec_comp_t *comp, void *userinfo)
 
 	printf("%-25s ", info->name);
 
-	n_tied = libelec_tie_get(comp, bus_list);
+	n_tied = libelec_tie_get_list(comp, n_conns, bus_list);
 	for (size_t i = 0; i < n_tied; i++) {
 		const elec_comp_info_t *bus_info =
 		    libelec_comp2info(bus_list[i]);
@@ -248,7 +212,7 @@ tie(void)
 	if (scanf("%63s %1023s", tie, buses) != 2)
 		return;
 
-	comp = name2comp(tie);
+	comp = libelec_comp_find(sys, tie);
 	if (comp == NULL) {
 		fprintf(stderr, "Unknown tie name %s\n", tie);
 		return;
@@ -258,13 +222,13 @@ tie(void)
 	} else if (strcmp(buses, "all") == 0) {
 		libelec_tie_set_all(comp, B_TRUE);
 	} else {
-		elec_comp_info_t **bus_list;
+		elec_comp_t **bus_list;
 		size_t list_len;
 		char **comps = strsplit(buses, ",", B_FALSE, &list_len);
 
 		bus_list = safe_calloc(list_len, sizeof (*bus_list));
 		for (size_t i = 0; i < list_len; i++) {
-			bus_list[i] = name2info(comps[i]);
+			bus_list[i] = libelec_comp_find(sys, comps[i]);
 			if (bus_list[i] == NULL) {
 				fprintf(stderr, "Unknown bus name %s\n",
 				    comps[i]);
@@ -274,7 +238,7 @@ tie(void)
 			}
 		}
 
-		libelec_tie_set_info_list(comp, bus_list, list_len);
+		libelec_tie_set_list(comp, list_len, bus_list);
 
 		free_strlist(comps, list_len);
 		free(bus_list);
@@ -315,7 +279,7 @@ cb(void)
 
 	if (scanf("%63s %d", cb_name, &set) != 2)
 		return;
-	comp = name2comp(cb_name);
+	comp = libelec_comp_find(sys, cb_name);
 	if (comp == NULL) {
 		fprintf(stderr, "Unknown CB %s\n", cb_name);
 		return;
@@ -332,7 +296,7 @@ batt(void)
 
 	if (scanf("%63s %f", batt_name, &chg_rel) != 2)
 		return;
-	comp = name2comp(batt_name);
+	comp = libelec_comp_find(sys, batt_name);
 	if (comp == NULL) {
 		fprintf(stderr, "Unknown batt %s\n", batt_name);
 		return;
@@ -406,6 +370,24 @@ print_help(void)
 	    "dump <filename.png> <BUS_NAME> - dump image of network at bus\n");
 }
 
+static void
+setup_binds(elec_comp_t *comp, void *userinfo)
+{
+	ASSERT(comp != NULL);
+	UNUSED(userinfo);
+
+	switch (libelec_comp2info(comp)->type) {
+	case ELEC_GEN:
+		libelec_gen_set_rpm_cb(comp, get_gen_rpm);
+		break;
+	case ELEC_BATT:
+		libelec_batt_set_temp_cb(comp, get_batt_temp);
+		break;
+	default:
+		break;
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -453,14 +435,17 @@ main(int argc, char **argv)
 	}
 	filename = argv[optind++];
 
-	sys = libelec_new(filename, binds);
+	sys = libelec_new(filename);
 	if (sys == NULL)
 		exit(EXIT_FAILURE);
+#ifdef	LIBELEC_WITH_NETLINK
 	if (send_url != NULL)
 		libelec_enable_net_send(sys, send_url);
 	if (recv_url != NULL)
 		libelec_enable_net_recv(sys, recv_url);
-	libelec_sys_start(sys);
+#endif	/* defined(LIBELEC_WITH_NETLINK) */
+	libelec_walk_comps(sys, setup_binds, NULL);
+	VERIFY(libelec_sys_start(sys));
 
 	for (;;) {
 		printf("> ");
@@ -512,24 +497,28 @@ main(int argc, char **argv)
 
 
 static double
-get_gen_rpm(elec_comp_t *comp)
+get_gen_rpm(elec_comp_t *comp, void *userinfo)
 {
 	UNUSED(comp);
+	UNUSED(userinfo);
 	return (100);
 }
 
 static double
-get_batt_temp(elec_comp_t *comp)
+get_batt_temp(elec_comp_t *comp, void *userinfo)
 {
 	UNUSED(comp);
+	UNUSED(userinfo);
 	return (C2KELVIN(15));
 }
 
 static double
-get_load(elec_comp_t *comp)
+get_load(elec_comp_t *comp, void *userinfo)
 {
 	load_info_t srch = { .info = libelec_comp2info(comp) };
 	load_info_t *load_info;
+
+	UNUSED(userinfo);
 
 	load_info = avl_find(&load_infos, &srch, NULL);
 	if (load_info != NULL)

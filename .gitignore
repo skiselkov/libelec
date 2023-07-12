@@ -1,2 +1,4 @@
 *.o
+doc/html
+src/build
 test/test

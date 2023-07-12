@@ -1,17 +1,13 @@
-/*7
- * CONFIDENTIAL
- *
- * Copyright 2021 Saso Kiselkov. All rights reserved.
- *
- * NOTICE:  All information contained herein is, and remains the property
- * of Saso Kiselkov. The intellectual and technical concepts contained
- * herein are proprietary to Saso Kiselkov and may be covered by U.S. and
- * Foreign Patents, patents in process, and are protected by trade secret
- * or copyright law. Dissemination of this information or reproduction of
- * this material is strictly forbidden unless prior written permission is
- * obtained from Saso Kiselkov.
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+/*
+ * Copyright 2023 Saso Kiselkov. All rights reserved.
  */
 
+#include <acfutils/cairo_utils.h>
 #include <acfutils/perf.h>
 
 #include "libelec_drawing.h"
@@ -171,7 +167,7 @@ elec_comp_get_nearest_pos(const elec_comp_t *comp, vect2_t *comp_pos,
 		return (false);
 
 	*align_vert = (comp->info->type == ELEC_TRU ||
-	    comp->info->type == ELEC_BATT);
+	    comp->info->type == ELEC_INV || comp->info->type == ELEC_BATT);
 
 	switch (comp->info->type) {
 	case ELEC_BATT:
@@ -511,7 +507,7 @@ draw_shunt(cairo_t *cr, double pos_scale, const elec_comp_t *shunt)
 }
 
 static void
-draw_tru(cairo_t *cr, double pos_scale, const elec_comp_info_t *info)
+draw_tru_inv(cairo_t *cr, double pos_scale, const elec_comp_info_t *info)
 {
 	vect2_t pos;
 	vect3_t color;
@@ -524,25 +520,38 @@ draw_tru(cairo_t *cr, double pos_scale, const elec_comp_info_t *info)
 
 	cairo_new_path(cr);
 
+	/* Background fill */
 	cairo_set_source_rgb(cr, color.x, color.y, color.z);
 	cairo_rectangle(cr, PX(pos.x - 1.5), PX(pos.y - 1.5), PX(3), PX(3));
 	cairo_fill(cr);
 
+	/* Line art */
 	cairo_set_source_rgb(cr, 0, 0, 0);
-
+	/* Surrounding box */
 	cairo_rectangle(cr, PX(pos.x - 1.5), PX(pos.y - 1.5), PX(3), PX(3));
 
+	/* Cross-line through the box */
 	cairo_move_to(cr, PX(pos.x - 1.5), PX(pos.y + 1.5));
 	cairo_rel_line_to(cr, PX(3), PX(-3));
 
-	cairo_move_to(cr, PX(pos.x - 1.3), PX(pos.y - 1));
+	/* Wavy line showing AC side */
+	if (info->type == ELEC_TRU)
+		cairo_move_to(cr, PX(pos.x - 0.8), PX(pos.y - 1));
+	else
+		cairo_move_to(cr, PX(pos.x + 0.8), PX(pos.y + 1));
+	cairo_rel_move_to(cr, PX(-0.5), 0);
 	cairo_rel_curve_to(cr, PX(0.1), PX(-0.4),
 	    PX(0.4), PX(-0.4), PX(0.5), 0);
 	cairo_rel_curve_to(cr, PX(0.1), PX(0.4),
 	    PX(0.4), PX(0.4), PX(0.5), 0);
 
-	cairo_move_to(cr, PX(pos.x + 1.3), PX(pos.y + 1));
-	cairo_rel_line_to(cr, PX(-1), 0);
+	/* Flat line showing DC side */
+	if (info->type == ELEC_TRU)
+		cairo_move_to(cr, PX(pos.x + 0.8), PX(pos.y + 1));
+	else
+		cairo_move_to(cr, PX(pos.x - 0.8), PX(pos.y - 1));
+	cairo_rel_move_to(cr, PX(-0.5), 0);
+	cairo_rel_line_to(cr, PX(1), 0);
 
 	cairo_stroke(cr);
 
@@ -820,6 +829,21 @@ draw_label_box(cairo_t *cr, double pos_scale, double font_sz,
 	cairo_restore(cr);
 }
 
+/**
+ * Draws the network base image into a `cairo_t` instance. You should
+ * use this before drawing any overlays (such as an open component info
+ * screen drawn using libelec_draw_comp_info()).
+ * @param sys The network to be drawn.
+ * @param cr The `cairo_t` instance into which the drawing will be performed.
+ * @param pos_scale A scaling multiplier applied to all `GUI_POS` stanzas
+ *	in the network layout configuration file. This lets you use abstract
+ *	size units in the config file and then scale them up as you see fit.
+ * @param font_sz Default font size to be used for all drawing. These
+ *	functions never reset the font face, so whatever you set using
+ *	cairo_set_font_face() will be used. The font size is only needed
+ *	in order to draw suffixes and smaller font information correctly
+ *	scaled to the default text size (which is used for headers, etc.)
+ */
 void
 libelec_draw_layout(const elec_sys_t *sys, cairo_t *cr, double pos_scale,
     double font_sz)
@@ -863,7 +887,8 @@ libelec_draw_layout(const elec_sys_t *sys, cairo_t *cr, double pos_scale,
 			draw_shunt(cr, pos_scale, comp);
 			break;
 		case ELEC_TRU:
-			draw_tru(cr, pos_scale, info);
+		case ELEC_INV:
+			draw_tru_inv(cr, pos_scale, info);
 			break;
 		case ELEC_TIE:
 			draw_tie(cr, pos_scale, comp);
@@ -879,8 +904,6 @@ libelec_draw_layout(const elec_sys_t *sys, cairo_t *cr, double pos_scale,
 			break;
 		case ELEC_LABEL_BOX:
 			VERIFY_FAIL();
-			break;
-		default:
 			break;
 		}
 	}
@@ -899,14 +922,14 @@ draw_comp_bg(cairo_t *cr, double pos_scale, vect2_t pos, vect2_t sz)
 
 	ASSERT(cr != NULL);
 
-#ifndef	LIBELEC_NO_GL
+#ifdef	LIBELEC_WITH_GL
 	mt_cairo_render_rounded_rectangle(cr, PX(pos.x - sz.x / 2),
 	    PX(pos.y - sz.y / 2), PX(sz.x), PX(sz.y), PX(0.5));
-#else	/* defined(LIBELEC_NO_GL) */
+#else	/* !defined(LIBELEC_WITH_GL) */
 	UNUSED(pos_scale);
 	UNUSED(pos);
 	UNUSED(sz);
-#endif	/* defined(LIBELEC_NO_GL) */
+#endif	/* !defined(LIBELEC_WITH_GL) */
 	path = cairo_copy_path(cr);
 	cairo_set_source_rgb(cr, COMP_INFO_BG_RGB);
 	cairo_fill(cr);
@@ -916,6 +939,19 @@ draw_comp_bg(cairo_t *cr, double pos_scale, vect2_t pos, vect2_t sz)
 	cairo_stroke(cr);
 
 	cairo_path_destroy(path);
+}
+
+static void
+draw_in_out_suffixes(cairo_t *cr, double pos_scale, vect2_t pos,
+    unsigned num_in, unsigned num_out)
+{
+	ASSERT(cr != NULL);
+
+	for (unsigned i = 0; i < num_in + num_out; i++) {
+		show_text_aligned(cr, PX(pos.x + 0.5),
+		    PX(pos.y + (i + 0.25) * LINE_HEIGHT),
+		    TEXT_ALIGN_LEFT, i < num_in ? "IN" : "OUT");
+	}
 }
 
 static void
@@ -933,7 +969,10 @@ draw_comp_info(const elec_comp_t *comp, cairo_t *cr, double pos_scale,
 	U_in = libelec_comp_get_in_volts(comp);
 	U_out = libelec_comp_get_out_volts(comp);
 	ac = libelec_comp_is_AC(comp);
-	f = (ac ? libelec_comp_get_in_freq(comp) : 0);
+	if (libelec_comp2info(comp)->type == ELEC_INV)
+		f = libelec_comp_get_out_freq(comp);
+	else
+		f = (ac ? libelec_comp_get_in_freq(comp) : 0);
 	I_in = libelec_comp_get_in_amps(comp);
 	I_out = libelec_comp_get_out_amps(comp);
 	W_in = libelec_comp_get_in_pwr(comp);
@@ -965,18 +1004,20 @@ draw_comp_info(const elec_comp_t *comp, cairo_t *cr, double pos_scale,
 	switch (comp->info->type) {
 	case ELEC_BATT:
 	case ELEC_TRU:
+	case ELEC_INV:
 		cairo_set_font_size(cr, 0.75 * font_sz);
-		for (int i = 0; i < (ac ? 7 : 6); i++) {
-			show_text_aligned(cr, PX(pos.x + 0.5),
-			    PX(pos.y + (i + 0.25) * LINE_HEIGHT),
-			    TEXT_ALIGN_LEFT, (i < (ac ? 4 : 3)) ? "IN" : "OUT");
-		}
+		if (comp->info->type == ELEC_INV)
+			draw_in_out_suffixes(cr, pos_scale, pos, 3, 4);
+		else if (comp->info->type == ELEC_TRU)
+			draw_in_out_suffixes(cr, pos_scale, pos, 4, 3);
+		else
+			draw_in_out_suffixes(cr, pos_scale, pos, 3, 3);
 
 		cairo_set_font_size(cr, font_sz);
 		show_text_aligned(cr, PX(pos.x), PX(pos.y), TEXT_ALIGN_LEFT,
 		    "U   : %.*fV", fixed_decimals(U_in, 4), U_in);
 		pos.y += LINE_HEIGHT;
-		if (ac) {
+		if (comp->info->type != ELEC_INV && ac) {
 			show_text_aligned(cr, PX(pos.x), PX(pos.y),
 			    TEXT_ALIGN_LEFT, "f   : %.*fHz",
 			    fixed_decimals(f, 4), f);
@@ -991,6 +1032,12 @@ draw_comp_info(const elec_comp_t *comp, cairo_t *cr, double pos_scale,
 		show_text_aligned(cr, PX(pos.x), PX(pos.y), TEXT_ALIGN_LEFT,
 		    "U   : %.*fV", fixed_decimals(U_out, 4), U_out);
 		pos.y += LINE_HEIGHT;
+		if (comp->info->type == ELEC_INV) {
+			show_text_aligned(cr, PX(pos.x), PX(pos.y),
+			    TEXT_ALIGN_LEFT, "f   : %.*fHz",
+			    fixed_decimals(f, 4), f);
+			pos.y += LINE_HEIGHT;
+		}
 		show_text_aligned(cr, PX(pos.x), PX(pos.y), TEXT_ALIGN_LEFT,
 		    "I   : %.*fA", fixed_decimals(I_out, 4), I_out);
 		pos.y += LINE_HEIGHT;
@@ -1146,8 +1193,19 @@ draw_gen_info(const elec_comp_t *gen, cairo_t *cr, double pos_scale,
 	    VECT2(pos.x + TEXT_OFF_X, y));
 }
 
+static const char *
+tru_inv2str(const elec_comp_info_t *info)
+{
+	ASSERT(info != NULL);
+	if (info->type == ELEC_INV)
+		return ("Inverter");
+	if (info->tru.charger)
+		return ("Battery Charger");
+	return ("Transformer-Rectifier");
+}
+
 static void
-draw_tru_info(const elec_comp_t *tru, cairo_t *cr, double pos_scale,
+draw_tru_inv_info(const elec_comp_t *tru, cairo_t *cr, double pos_scale,
     double font_sz, vect2_t pos)
 {
 	const double TEXT_OFF_X = -8.5, TEXT_OFF_Y = 3;
@@ -1155,17 +1213,16 @@ draw_tru_info(const elec_comp_t *tru, cairo_t *cr, double pos_scale,
 
 	ASSERT(tru != NULL);
 	ASSERT(tru->info != NULL);
-	ASSERT3U(tru->info->type, ==, ELEC_TRU);
+	ASSERT(tru->info->type == ELEC_TRU || tru->info->type == ELEC_INV);
 
 	draw_comp_bg(cr, pos_scale, VECT2(pos.x - 2, pos.y + 5.5),
 	    VECT2(14, 15.5));
-	draw_tru(cr, pos_scale, tru->info);
+	draw_tru_inv(cr, pos_scale, tru->info);
 
 	y = pos.y + TEXT_OFF_Y;
 
 	show_text_aligned(cr, PX(pos.x + TEXT_OFF_X), PX(y), TEXT_ALIGN_LEFT,
-	    "Type: %s", !tru->info->tru.charger ? "Transformer-Rectifier" :
-	    "Battery Charger");
+	    "Type: %s", tru_inv2str(tru->info));
 	y += LINE_HEIGHT;
 
 	show_text_aligned(cr, PX(pos.x + TEXT_OFF_X), PX(y), TEXT_ALIGN_LEFT,
@@ -1380,6 +1437,11 @@ draw_bus_info(const elec_comp_t *bus, cairo_t *cr, double pos_scale,
 	cairo_set_line_width(cr, 2);
 }
 
+/**
+ * Draws a "component info" overlay window for a particular component.
+ * This should be called if you want to draw a popup showing additional
+ * information about a particular component.
+ */
 void
 libelec_draw_comp_info(const elec_comp_t *comp, cairo_t *cr,
     double pos_scale, double font_sz, vect2_t pos)
@@ -1400,7 +1462,8 @@ libelec_draw_comp_info(const elec_comp_t *comp, cairo_t *cr,
 		draw_gen_info(comp, cr, pos_scale, font_sz, pos);
 		break;
 	case ELEC_TRU:
-		draw_tru_info(comp, cr, pos_scale, font_sz, pos);
+	case ELEC_INV:
+		draw_tru_inv_info(comp, cr, pos_scale, font_sz, pos);
 		break;
 	case ELEC_LOAD:
 		draw_load_info(comp, cr, pos_scale, font_sz, pos);
