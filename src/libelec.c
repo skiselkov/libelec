@@ -4533,7 +4533,7 @@ libelec_tie_get_num_buses(const elec_comp_t *comp)
  *	be an exhaustive list of buses which are currently tied).
  */
 bool
-libelec_tie_get(elec_comp_t *tie, bool exhaustive, ...)
+libelec_tie_get(elec_comp_t *tie, bool_t exhaustive, ...)
 {
 	va_list ap;
 	bool res;

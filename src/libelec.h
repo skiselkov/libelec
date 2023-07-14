@@ -518,7 +518,11 @@ size_t libelec_tie_get_list(elec_comp_t *comp, size_t cap,
     elec_comp_t *bus_list[static cap]);
 #endif	/* !defined(__cplusplus) */
 size_t libelec_tie_get_num_buses(const elec_comp_t *comp);
-bool libelec_tie_get(elec_comp_t *tie, bool exhaustive, ...)
+/*
+ * Due to default argument promotion and va_start underneath,
+ * we cannot use the native bool type here.
+ */
+bool libelec_tie_get(elec_comp_t *tie, bool_t exhaustive, ...)
     SENTINEL_ATTR;
 bool libelec_tie_get_v(elec_comp_t *tie, bool exhaustive, va_list ap);
 
