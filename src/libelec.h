@@ -510,13 +510,13 @@ void libelec_tie_set(elec_comp_t *comp, ...) SENTINEL_ATTR;
 void libelec_tie_set_v(elec_comp_t *comp, va_list ap);
 void libelec_tie_set_all(elec_comp_t *comp, bool tied);
 bool libelec_tie_get_all(elec_comp_t *comp);
-#ifdef	__cplusplus
+#if	defined(__cplusplus) || defined(_MSC_VER)
 size_t libelec_tie_get_list(elec_comp_t *comp, size_t cap,
     elec_comp_t **bus_list);
-#else	/* !defined(__cplusplus) */
+#else	/* !defined(__cplusplus) && !defined(_MSC_VER) */
 size_t libelec_tie_get_list(elec_comp_t *comp, size_t cap,
     elec_comp_t *bus_list[static cap]);
-#endif	/* !defined(__cplusplus) */
+#endif	/* !defined(__cplusplus) && !defined(_MSC_VER) */
 size_t libelec_tie_get_num_buses(const elec_comp_t *comp);
 /*
  * Due to default argument promotion and va_start underneath,
