@@ -86,16 +86,19 @@ typedef struct {
 	avl_node_t	node;
 } user_cb_info_t;
 
+/*
+ * Can't use VECT2() and NULL_VECT2 macros here, MSVC doesn't have proper
+ * support for compound literals.
+ */
 static const vect2_t batt_temp_energy_curve[] = {
-    VECT2(C2KELVIN(-90), 0.01),
-    VECT2(C2KELVIN(-75), 0.01),
-    VECT2(C2KELVIN(-50), 0.125),
-    VECT2(C2KELVIN(-20), 0.45),
-    VECT2(C2KELVIN(-5), 0.7),
-    VECT2(C2KELVIN(15), 0.925),
-    VECT2(C2KELVIN(40), 1.0),
-    VECT2(C2KELVIN(50), 1.0),
-    NULL_VECT2
+    {C2KELVIN(-90), 0.01},
+    {C2KELVIN(-75), 0.01},
+    {C2KELVIN(-50), 0.125},
+    {C2KELVIN(-20), 0.45},
+    {C2KELVIN(-5), 0.7},
+    {C2KELVIN(15), 0.925},
+    {C2KELVIN(40), 1.0},
+    {C2KELVIN(50), 1.0}
 };
 
 static elec_comp_info_t *infos_parse(const char *filename, size_t *num_infos);
@@ -2997,7 +3000,8 @@ network_update_batt(elec_comp_t *batt, double d_t)
 
 	batt->batt.T = batt->info->batt.get_temp(batt, batt->info->userinfo);
 	ASSERT3F(batt->batt.T, >, 0);
-	temp_coeff = fx_lin_multi(batt->batt.T, batt_temp_energy_curve, true);
+	temp_coeff = fx_lin_multi2(batt->batt.T, batt_temp_energy_curve,
+	    ARRAY_NUM_ELEM(batt_temp_energy_curve), true);
 
 	I_max = batt->info->batt.max_pwr / batt->info->batt.volts;
 	I_rel = batt->batt.prev_amps / I_max;
@@ -3997,17 +4001,19 @@ static void
 print_trace_data(const elec_comp_t *comp, unsigned depth, bool out_data,
     double load)
 {
-	char spaces[2 * depth + 1];
+	char *spaces;
 	double W;
 
 	ASSERT(comp != NULL);
 
+	spaces = safe_malloc(2 * depth + 1);
 	mk_spaces(spaces, 2 * depth + 1);
 	W = out_data ? (comp->rw.out_volts * comp->rw.out_amps) :
 	    (comp->rw.in_volts * comp->rw.in_amps);
 	logMsg("%s%-5s  %s  %3s: %.2fW  LOADS: %.2fW",
 	    spaces, comp_type2str(comp->info->type), comp->info->name,
 	    out_data ? "OUT" : "IN", W, load);
+	free(spaces);
 }
 
 static double
@@ -4312,9 +4318,15 @@ libelec_cb_get_temp(const elec_comp_t *comp)
  *	this list become untied.
  * @see \ref ELEC_TIE
  */
+#if	defined(__cplusplus) || defined(_MSC_VER)
+void
+libelec_tie_set_list(elec_comp_t *comp, size_t list_len,
+    elec_comp_t *const*bus_list)
+#else	/* !defined(__cplusplus) && !defined(_MSC_VER) */
 void
 libelec_tie_set_list(elec_comp_t *comp, size_t list_len,
     elec_comp_t *const bus_list[list_len])
+#endif	/* !defined(__cplusplus) && !defined(_MSC_VER) */
 {
 	bool *new_state;
 
@@ -4475,9 +4487,15 @@ libelec_tie_get_all(elec_comp_t *comp)
  * @return The actual number of buses filled into `bus_list`.
  * @see libelec_tie_get_num_buses()
  */
+#if	defined(__cplusplus) || defined(_MSC_VER)
+size_t
+libelec_tie_get_list(elec_comp_t *comp, size_t cap,
+    elec_comp_t **bus_list)
+#else	/* !defined(__cplusplus) && !defined(_MSC_VER) */
 size_t
 libelec_tie_get_list(elec_comp_t *comp, size_t cap,
     elec_comp_t *bus_list[static cap])
+#endif	/* !defined(__cplusplus) && !defined(_MSC_VER) */
 {
 	size_t n_tied = 0;
 
@@ -4656,17 +4674,16 @@ double
 libelec_phys_get_batt_voltage(double U_nominal, double chg_rel, double I_rel)
 {
 	static const vect2_t chg_volt_curve[] = {
-	    VECT2(0.00, 0.00),
-	    VECT2(0.04, 0.70),
-	    VECT2(0.10, 0.80),
-	    VECT2(0.20, 0.87),
-	    VECT2(0.30, 0.91),
-	    VECT2(0.45, 0.94),
-	    VECT2(0.60, 0.95),
-	    VECT2(0.80, 0.96),
-	    VECT2(0.90, 0.97),
-	    VECT2(1.00, 1.00),
-	    NULL_VECT2
+	    {0.00, 0.00},
+	    {0.04, 0.70},
+	    {0.10, 0.80},
+	    {0.20, 0.87},
+	    {0.30, 0.91},
+	    {0.45, 0.94},
+	    {0.60, 0.95},
+	    {0.80, 0.96},
+	    {0.90, 0.97},
+	    {1.00, 1.00}
 	};
 	ASSERT3F(U_nominal, >, 0);
 	ASSERT3F(chg_rel, >=, 0);
@@ -4677,7 +4694,8 @@ libelec_phys_get_batt_voltage(double U_nominal, double chg_rel, double I_rel)
 	ASSERT3F(chg_rel, <=, 1.0001);
 	I_rel = clamp(I_rel, 0, 1);
 	return (U_nominal * (1 - clamp(pow(I_rel, 1.45), 0, 1)) *
-	    fx_lin_multi(chg_rel, chg_volt_curve, true));
+	    fx_lin_multi2(chg_rel, chg_volt_curve,
+	    ARRAY_NUM_ELEM(chg_volt_curve), true));
 }
 
 #ifdef	LIBELEC_WITH_NETLINK

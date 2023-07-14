@@ -499,13 +499,13 @@ bool libelec_cb_get(const elec_comp_t *comp);
 double libelec_cb_get_temp(const elec_comp_t *comp);
 
 /* Ties */
-#ifdef	__cplusplus
+#if	defined(__cplusplus) || defined(_MSC_VER)
 void libelec_tie_set_list(elec_comp_t *comp, size_t list_len,
     elec_comp_t *const*bus_list);
-#else	/* !defined(__cplusplus) */
+#else	/* !defined(__cplusplus) && !defined(_MSC_VER) */
 void libelec_tie_set_list(elec_comp_t *comp, size_t list_len,
     elec_comp_t *const bus_list[list_len]);
-#endif	/* !defined(__cplusplus) */
+#endif	/* !defined(__cplusplus) && !defined(_MSC_VER) */
 void libelec_tie_set(elec_comp_t *comp, ...) SENTINEL_ATTR;
 void libelec_tie_set_v(elec_comp_t *comp, va_list ap);
 void libelec_tie_set_all(elec_comp_t *comp, bool tied);
