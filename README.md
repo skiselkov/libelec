@@ -87,8 +87,21 @@ control the library.
 
 libelec is written in C99, so you will want to make sure your compiler's
 C language mode is set to at least C99 (newer is ok, but ANSI C90, ISO
-C89 or K&R C are too old). You can also define the following optional
-compiler macros to fine-tune the libelec build:
+C89 or K&R C are too old):
+
+- If using GCC or Clang using custom Makefiles or if you directly
+  manipulate the compiler's arguments, add the `-std=c99` or `-std=c11`
+  or `-std=c17` option to the compiler arguments.
+
+- If using GCC or Clang through CMake, set the `C_STANDARD_REQUIRED` target
+  property to "99" or "11" or "17" (for C99 or C11 or C17 respectively).
+
+- If using Visual Studio, open your solution's configuration properties,
+  navigate to "C/C++ > Language" and change the "C Language Standard"
+  setting from "Default (Legacy MSVC)" to "ISO C11" or "ISO C17".
+
+You can also define the following optional compiler macros to fine-tune
+the libelec build:
 
 - `XPLANE` - if this macro is defined, libelec will depend on running
    inside of X-Plane and having the XPLM available. The benefit is that
@@ -114,9 +127,12 @@ compiler macros to fine-tune the libelec build:
 
 Building the project using CMake will produce a static library, which you
 can then link into your project. To build using the included
-`CMakeLists.txt` file, do the following:
+`CMakeLists.txt` file, do the following in your operating system's
+terminal (PowerShell for Windows will work, provided you have added CMake
+to your PATH):
 
-1. Create a `build` subdirectory under `src` to hold the build products:
+1. Create a `build` subdirectory under `src` to hold the build products
+   and cd into it:
 ```
 $ mkdir src/build
 $ cd src/build
@@ -124,24 +140,37 @@ $ cd src/build
 2. Configure CMake. Please note that you will require the redistributable
    package of libacfutils installed somewhere (say at path `${LIBACFUTILS}`):
 ```
-$ cmake -DLIBACFUTILS=${LIBACFUTILS} ..
+$ cmake "-DLIBACFUTILS=${LIBACFUTILS}" ..
 ```
 3. Now just run the build:
 ```
-$ cmake --build .
+$ cmake --build . --config Release
 ```
 
-This will produce a static library named either `libelec.lib` (on
-Windows), or `libelec.a` (on macOS and Linux). On macOS, the built
-library will contain both the x86-64 and arm64 bits and can thus be used
-to build universal software. On Linux, you can cross-compile to Windows
-(MinGW) using the following CMake command instead (you will obviously
-also need to have the MinGW toolchain installed separately):
+This will produce a static library named either `libelec.a` (on macOS and
+Linux) or `Release\libelec.lib` (on Windows). On macOS, the built library
+will contain both the x86-64 and arm64 bits and can thus be used to build
+universal software. On Linux, you can cross-compile to Windows (MinGW)
+using the following CMake command instead (you will obviously also need
+to have the MinGW toolchain installed separately):
 
 ```
 $ cmake .. -DLIBACFUTILS=${LIBACFUTILS} \
     -DCMAKE_TOOLCHAIN_FILE=../XCompile.cmake -DHOST=x86_64-w64-mingw32
-$ make
+$ cmake --build .
+```
+
+To build a debug version of the library with full debug symbols,
+depending on your host platform, do the following:
+
+- On Linux, macOS and MinGW, replace step 2 above with:
+```
+$ cmake "-DLIBACFUTILS=${LIBACFUTILS}" -DCMAKE_BUILD_TYPE=Debug ..
+```
+
+- On Visual Studio, replace step 3 above with:
+```
+$ cmake --build . --config Debug
 ```
 
 ## Usage
