@@ -124,11 +124,11 @@ $ cd src/build
 2. Configure CMake. Please note that you will require the redistributable
    package of libacfutils installed somewhere (say at path `${LIBACFUTILS}`):
 ```
-$ cmake .. -DLIBACFUTILS=${LIBACFUTILS}
+$ cmake -DLIBACFUTILS=${LIBACFUTILS} ..
 ```
 3. Now just run the build:
 ```
-$ make
+$ cmake --build .
 ```
 
 This will produce a static library named either `libelec.lib` (on
