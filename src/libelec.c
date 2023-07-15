@@ -666,7 +666,10 @@ libelec_new(const char *filename)
 		case ELEC_TIE:
 			break;
 		}
-		comp->links = safe_calloc(comp->n_links, sizeof (*comp->links));
+		if (comp->n_links != 0) {
+			comp->links = safe_calloc(comp->n_links,
+			    sizeof (*comp->links));
+		}
 		/* Component setup */
 		switch (comp->info->type) {
 		case ELEC_BATT:
