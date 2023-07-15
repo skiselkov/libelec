@@ -1548,11 +1548,11 @@ infos_parse(const char *filename, size_t *num_infos)
 
 		comps = strsplit(line, " ", true, &n_comps);
 		cmd = comps[0];
-		infos[comp_i].parse_linenum = linenum;
 		if (strcmp(cmd, "BATT") == 0 && n_comps == 2) {
 			ASSERT3U(comp_i, <, num_comps);
 			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
+			info->parse_linenum = linenum;
 			info->type = ELEC_BATT;
 			info->name = safe_strdup(comps[1]);
 			info->int_R = 1;
@@ -1560,6 +1560,7 @@ infos_parse(const char *filename, size_t *num_infos)
 			ASSERT3U(comp_i, <, num_comps);
 			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
+			info->parse_linenum = linenum;
 			info->type = ELEC_GEN;
 			info->name = safe_strdup(comps[1]);
 			info->int_R = 1;
@@ -1567,6 +1568,7 @@ infos_parse(const char *filename, size_t *num_infos)
 			ASSERT3U(comp_i, <, num_comps);
 			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
+			info->parse_linenum = linenum;
 			info->type = ELEC_TRU;
 			info->name = safe_strdup(comps[1]);
 			info->int_R = 1;
@@ -1574,6 +1576,7 @@ infos_parse(const char *filename, size_t *num_infos)
 			ASSERT3U(comp_i, <, num_comps);
 			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
+			info->parse_linenum = linenum;
 			info->type = ELEC_INV;
 			info->name = safe_strdup(comps[1]);
 			info->int_R = 1;
@@ -1582,6 +1585,7 @@ infos_parse(const char *filename, size_t *num_infos)
 			ASSERT3U(comp_i, <, num_comps);
 			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
+			info->parse_linenum = linenum;
 			info->type = ELEC_LOAD;
 			info->name = safe_strdup(comps[1]);
 			if (n_comps == 3)
@@ -1590,6 +1594,7 @@ infos_parse(const char *filename, size_t *num_infos)
 			ASSERT3U(comp_i, <, num_comps);
 			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
+			info->parse_linenum = linenum;
 			info->type = ELEC_BUS;
 			info->name = safe_strdup(comps[1]);
 			info->bus.ac = (strcmp(comps[2], "AC") == 0);
@@ -1600,6 +1605,7 @@ infos_parse(const char *filename, size_t *num_infos)
 			ASSERT3U(comp_i, <, num_comps);
 			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
+			info->parse_linenum = linenum;
 			info->type = ELEC_CB;
 			info->name = safe_strdup(comps[1]);
 			info->cb.rate = 4;
@@ -1609,24 +1615,28 @@ infos_parse(const char *filename, size_t *num_infos)
 			ASSERT3U(comp_i, <, num_comps);
 			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
+			info->parse_linenum = linenum;
 			info->type = ELEC_SHUNT;
 			info->name = safe_strdup(comps[1]);
 		} else if (strcmp(cmd, "TIE") == 0 && n_comps == 2) {
 			ASSERT3U(comp_i, <, num_comps);
 			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
+			info->parse_linenum = linenum;
 			info->type = ELEC_TIE;
 			info->name = safe_strdup(comps[1]);
 		} else if (strcmp(cmd, "DIODE") == 0 && n_comps == 2) {
 			ASSERT3U(comp_i, <, num_comps);
 			CHECK_DUP_NAME(comps[1]);
 			info = &infos[comp_i++];
+			info->parse_linenum = linenum;
 			info->type = ELEC_DIODE;
 			info->name = safe_strdup(comps[1]);
 		} else if (strcmp(cmd, "LABEL_BOX") == 0 && n_comps >= 7) {
 			size_t sz = 0;
 			ASSERT3U(comp_i, <, num_comps);
 			info = &infos[comp_i++];
+			info->parse_linenum = linenum;
 			info->type = ELEC_LABEL_BOX;
 			info->label_box.pos =
 			    VECT2(atof(comps[1]), atof(comps[2]));
@@ -1803,6 +1813,7 @@ infos_parse(const char *filename, size_t *num_infos)
 
 			ASSERT3U(comp_i + 1, <, num_comps);
 			cb = &infos[comp_i++];
+			cb->parse_linenum = linenum;
 			cb->type = ELEC_CB;
 			cb->name = sprintf_alloc("CB_%s", info->name);
 			cb->cb.rate = 1;
@@ -1815,6 +1826,7 @@ infos_parse(const char *filename, size_t *num_infos)
 			}
 
 			bus = &infos[comp_i++];
+			bus->parse_linenum = linenum;
 			bus->type = ELEC_BUS;
 			bus->name = sprintf_alloc("CB_BUS_%s", info->name);
 			bus->bus.ac = info->load.ac;
