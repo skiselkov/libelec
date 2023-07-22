@@ -33,6 +33,11 @@ execute_process(COMMAND git rev-parse --short HEAD
 string(REGEX REPLACE "\n$" "" LIBELEC_VERSION "${LIBELEC_VERSION}")
 string(TIMESTAMP BUILD_TIMESTAMP "%Y-%m-%d %H:%M:%S UTC" UTC)
 
+if(APPLE)
+	# Build universal binaries on macOS
+	set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64")
+endif()
+
 # Instantiates project
 add_executable(nettest ${ALL_SRCS})
 
@@ -66,10 +71,6 @@ if(UNIX AND NOT APPLE)
 	if (${SANITIZE})
 		set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address")
 	endif()
-endif()
-if(APPLE)
-	# Build universal binaries on macOS
-	set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64")
 endif()
 
 # Defines
@@ -152,11 +153,18 @@ else()
 endif()
 
 find_path(READLINE_HDR "readline/readline.h")
-find_library(READLINE_LIB "readline")
+find_library(READLINE_LIB "libreadline.a")
+if(NOT READLINE_LIB)
+	find_library(READLINE_LIB "readline")
+elseif(APPLE)
+	find_library(TINFO_LIB "libncurses.a")
+elseif(UNIX)
+	find_library(TINFO_LIB "libtinfo.a")
+endif()
 
 if(READLINE_HDR AND READLINE_LIB)
 	add_definitions(-DWITH_READLINE)
-	set(PLATFORM_LIBS ${PLATFORM_LIBS} ${READLINE_LIB})
+	set(PLATFORM_LIBS ${PLATFORM_LIBS} ${READLINE_LIB} ${TINFO_LIB})
 endif()
 
 target_link_libraries(nettest
