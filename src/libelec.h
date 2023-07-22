@@ -213,8 +213,8 @@ typedef struct {
  * of the generator's input shaft, which is then used for determining
  * the generator's output voltage and frequency behavior. This callback
  * is installed for generators using libelec_gen_set_rpm_cb().
- * @note A generator MUST have an rpm callback configured before the
- *	network can be started using libelec_sys_start().
+ * @note You DON'T have to set a generator rpm callback. You can instead
+ *	call libelec_gen_set_rpm() regularly to set the rpm value directly.
  * @param comp The component for which the generator rpm is being queried.
  * @param userinfo Custom userinfo pointer, which was previously set up
  *	on the component using libelec_comp_set_userinfo().
@@ -223,6 +223,7 @@ typedef struct {
  *	the generator in the config file. libelec doesn't enforce any
  *	specific type of units for generator, so you can use whatever
  *	units are most convenient.
+ * @see libelec_gen_set_rpm()
  */
 typedef double (*elec_get_rpm_cb_t)(elec_comp_t *comp, void *userinfo);
 /**
@@ -413,7 +414,7 @@ typedef void (*elec_user_cb_t)(elec_sys_t *sys, bool pre, void *userinfo);
 elec_sys_t *libelec_new(const char *filename);
 void libelec_destroy(elec_sys_t *sys);
 
-elec_comp_info_t *libelec_get_comp_infos(const elec_sys_t *sys,
+const elec_comp_info_t *libelec_get_comp_infos(const elec_sys_t *sys,
     size_t *num_infos);
 
 bool libelec_sys_start(elec_sys_t *sys);
@@ -471,6 +472,7 @@ double libelec_comp_get_in_freq(const elec_comp_t *comp);
 double libelec_comp_get_out_freq(const elec_comp_t *comp);
 double libelec_comp_get_incap_volts(const elec_comp_t *comp);
 bool libelec_comp_is_powered(const elec_comp_t *comp);
+double libelec_comp_get_eff(const elec_comp_t *gen);
 
 /* Failures */
 void libelec_comp_set_failed(elec_comp_t *comp, bool failed);
@@ -526,9 +528,17 @@ bool libelec_tie_get(elec_comp_t *tie, bool_t exhaustive, ...)
     SENTINEL_ATTR;
 bool libelec_tie_get_v(elec_comp_t *tie, bool exhaustive, va_list ap);
 
+/*
+ * Generators
+ */
+void libelec_gen_set_rpm(elec_comp_t *gen, double rpm);
+double libelec_gen_get_rpm(const elec_comp_t *gen);
+
 /* Batteries */
 double libelec_batt_get_chg_rel(const elec_comp_t *batt);
 void libelec_batt_set_chg_rel(elec_comp_t *batt, double chg_rel);
+double libelec_batt_get_temp(const elec_comp_t *batt);
+void libelec_batt_set_temp(elec_comp_t *batt, double T);
 
 /* Miscellaneous */
 bool libelec_chgr_get_working(const elec_comp_t *chgr);

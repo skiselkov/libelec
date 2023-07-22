@@ -1,4 +1,5 @@
 *.o
 doc/html
 src/build
-test/test
+nettest/nettest
+nettest/build

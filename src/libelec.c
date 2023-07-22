@@ -42,6 +42,7 @@
 #define	NO_NEG_ZERO(x)		((x) == 0.0 ? 0.0 : (x))
 #define	CB_SW_ON_DELAY		0.33	/* sec */
 #define	MAX_COMPS		(UINT16_MAX + 1)
+#define	GEN_MIN_RPM		1e-3
 
 #ifdef	LIBELEC_WITH_NETLINK
 
@@ -240,14 +241,16 @@ static int
 user_cb_info_compar(const void *a, const void *b)
 {
 	const user_cb_info_t *ucbi_a = a, *ucbi_b = b;
+	const uintptr_t cb_a = (uintptr_t)ucbi_a->cb;
+	const uintptr_t cb_b = (uintptr_t)ucbi_a->cb;
 
 	if (!ucbi_a->pre && ucbi_b->pre)
 		return (-1);
 	if (ucbi_a->pre && !ucbi_b->pre)
 		return (1);
-	if ((void *)ucbi_a->cb < (void *)ucbi_b->cb)
+	if (cb_a < cb_b)
 		return (-1);
-	if ((void *)ucbi_a->cb > (void *)ucbi_b->cb)
+	if (cb_a > cb_b)
 		return (1);
 	if (ucbi_a->userinfo < ucbi_b->userinfo)
 		return (-1);
@@ -486,21 +489,23 @@ resolve_comp_links(elec_sys_t *sys)
 	return (true);
 }
 
-static void
+WARN_UNUSED_RES_ATTR static bool
 check_comp_links(elec_sys_t *sys)
 {
 	ASSERT(sys != NULL);
 
-#define	CHECK_LINK(field) \
-	VERIFY_MSG((field) != NULL, "Component %s is missing a network link", \
-	    comp->info->name)
 	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
 	    comp = list_next(&sys->comps, comp)) {
 		ASSERT(comp->info != NULL);
-		for (unsigned i = 0; i < comp->n_links; i++)
-			CHECK_LINK(comp->links[i].comp);
+		for (unsigned i = 0; i < comp->n_links; i++) {
+			if (comp->links[i].comp == NULL) {
+				logMsg("Component %s is missing a network link",
+				    comp->info->name);
+				return (false);
+			}
+		}
 	}
-#undef	CHECK_LINK
+	return (true);
 }
 
 /**
@@ -511,13 +516,133 @@ check_comp_links(elec_sys_t *sys)
  * @param num_infos Mandatory return parameter, which will be filled
  *	with the number of elements in the returned array.
  */
-elec_comp_info_t *
+const elec_comp_info_t *
 libelec_get_comp_infos(const elec_sys_t *sys, size_t *num_infos)
 {
 	ASSERT(sys != NULL);
 	ASSERT(num_infos != NULL);
 	*num_infos = sys->num_infos;
 	return (sys->comp_infos);
+}
+
+static void
+comp_alloc(elec_sys_t *sys, elec_comp_info_t *info, unsigned *src_i)
+{
+	elec_comp_t *comp = safe_calloc(1, sizeof (*comp));
+	avl_index_t where;
+	ASSERT(info != NULL);
+
+	comp->sys = sys;
+	comp->info = info;
+	mutex_init(&comp->rw_ro_lock);
+	VERIFY_MSG(avl_find(&sys->info2comp, comp, &where) == NULL,
+	    "Duplicate elec info usage %s", info->name);
+	avl_insert(&sys->info2comp, comp, where);
+	list_insert_tail(&sys->comps, comp);
+
+	VERIFY_MSG(avl_find(&sys->name2comp, comp, &where) ==
+	    NULL, "Duplicate info name %s", info->name);
+	avl_insert(&sys->name2comp, comp, where);
+	/*
+	 * Initialize component fields and default values
+	 */
+	switch (comp->info->type) {
+	case ELEC_LOAD:
+		comp->load.random_load_factor = 1;
+		break;
+	case ELEC_BATT:
+		comp->src_idx = *src_i;
+		(*src_i)++;
+		mutex_init(&comp->batt.lock);
+		comp->batt.chg_rel = 1.0;
+		comp->batt.T = C2KELVIN(15);
+		break;
+	case ELEC_GEN:
+		mutex_init(&comp->gen.lock);
+		comp->gen.tgt_volts = comp->info->gen.volts;
+		comp->gen.tgt_freq = comp->info->gen.freq;
+		comp->gen.ctr_rpm = AVG(comp->info->gen.min_rpm,
+		    comp->info->gen.max_rpm);
+		comp->gen.rpm = GEN_MIN_RPM;
+		comp->gen.max_stab_U =
+		    comp->gen.ctr_rpm / comp->info->gen.min_rpm;
+		comp->gen.min_stab_U =
+		    comp->gen.ctr_rpm / comp->info->gen.max_rpm;
+		if (comp->info->gen.stab_rate_f > 0) {
+			comp->gen.max_stab_f = comp->gen.ctr_rpm /
+			    comp->info->gen.min_rpm;
+			comp->gen.min_stab_f = comp->gen.ctr_rpm /
+			    comp->info->gen.max_rpm;
+		}
+		break;
+	case ELEC_TRU:
+	case ELEC_INV:
+		/* TRUs and inverters are basically the same thing in libelec */
+		comp->src_idx = *src_i;
+		(*src_i)++;
+		break;
+	case ELEC_BUS:
+		break;
+	case ELEC_CB:
+	case ELEC_SHUNT:
+		/* CBs and shunts are basically the same thing in libelec */
+		comp->scb.cur_set = comp->scb.wk_set = true;
+		break;
+	case ELEC_TIE:
+		mutex_init(&comp->tie.lock);
+		break;
+	case ELEC_DIODE:
+		break;
+	case ELEC_LABEL_BOX:
+		break;
+	}
+	/*
+	 * Initialize links
+	 */
+	switch (comp->info->type) {
+	case ELEC_BATT:
+	case ELEC_GEN:
+	case ELEC_LOAD:
+		comp->n_links = 1;
+		break;
+	case ELEC_TRU:
+	case ELEC_INV:
+	case ELEC_CB:
+	case ELEC_SHUNT:
+	case ELEC_DIODE:
+		comp->n_links = 2;
+		break;
+	case ELEC_BUS:
+	case ELEC_LABEL_BOX:
+	case ELEC_TIE:
+		break;
+	}
+	if (comp->n_links != 0)
+		comp->links = safe_calloc(comp->n_links, sizeof (*comp->links));
+	/*
+	 * Insert the component into the relevant type-specific lists
+	 */
+	if (comp->info->type == ELEC_BATT || comp->info->type == ELEC_GEN)
+		list_insert_tail(&sys->gens_batts, comp);
+	else if (comp->info->type == ELEC_TIE)
+		list_insert_tail(&sys->ties, comp);
+	/*
+	 * If dataref exposing is enabled, create those now.
+	 */
+#ifdef	LIBELEC_WITH_DRS
+		dr_create_f64(&comp->drs.in_volts, &comp->ro.in_volts,
+		    false, "libelec/comp/%s/in_volts", comp->info->name);
+		dr_create_f64(&comp->drs.out_volts, &comp->ro.out_volts,
+		    false, "libelec/comp/%s/out_volts", comp->info->name);
+		dr_create_f64(&comp->drs.in_amps, &comp->ro.in_amps,
+		    false, "libelec/comp/%s/in_amps", comp->info->name);
+		dr_create_f64(&comp->drs.out_amps, &comp->ro.out_amps,
+		    false, "libelec/comp/%s/out_amps", comp->info->name);
+		dr_create_f64(&comp->drs.in_pwr, &comp->ro.in_pwr,
+		    false, "libelec/comp/%s/in_pwr", comp->info->name);
+		dr_create_f64(&comp->drs.out_pwr, &comp->ro.out_pwr,
+		    false, "libelec/comp/%s/out_pwr", comp->info->name);
+#endif	/* defined(LIBELEC_WITH_DRS) */
 }
 
 /**
@@ -614,119 +739,12 @@ libelec_new(const char *filename)
 	mutex_init(&sys->paused_lock);
 	sys->time_factor = 1;
 
-	for (size_t i = 0; i < sys->num_infos; i++) {
-		elec_comp_t *comp = safe_calloc(1, sizeof (*comp));
-		avl_index_t where;
-		elec_comp_info_t *info = &sys->comp_infos[i];
-
-		comp->sys = sys;
-		comp->info = info;
-		mutex_init(&comp->rw_ro_lock);
-		VERIFY_MSG(avl_find(&sys->info2comp, comp, &where) == NULL,
-		    "Duplicate elec info usage %s", info->name);
-		avl_insert(&sys->info2comp, comp, where);
-		list_insert_tail(&sys->comps, comp);
-
-		VERIFY_MSG(avl_find(&sys->name2comp, comp, &where) ==
-		    NULL, "Duplicate info name %s", info->name);
-		avl_insert(&sys->name2comp, comp, where);
-
-		/* Initialize component */
-		if (comp->info->type == ELEC_LOAD) {
-			comp->load.random_load_factor = 1;
-		} else if (comp->info->type == ELEC_BATT ||
-		    comp->info->type == ELEC_GEN ||
-		    comp->info->type == ELEC_TRU ||
-		    comp->info->type == ELEC_INV) {
-			comp->src_idx = src_i;
-			src_i++;
-		}
-		if (comp->info->type == ELEC_BATT ||
-		    comp->info->type == ELEC_GEN) {
-			list_insert_tail(&sys->gens_batts, comp);
-		} else if (comp->info->type == ELEC_TIE) {
-			list_insert_tail(&sys->ties, comp);
-		}
-		/* Initialize links */
-		switch (comp->info->type) {
-		case ELEC_BATT:
-		case ELEC_GEN:
-		case ELEC_LOAD:
-			comp->n_links = 1;
-			break;
-		case ELEC_TRU:
-		case ELEC_INV:
-		case ELEC_CB:
-		case ELEC_SHUNT:
-		case ELEC_DIODE:
-			comp->n_links = 2;
-			break;
-		case ELEC_BUS:
-		case ELEC_LABEL_BOX:
-		case ELEC_TIE:
-			break;
-		}
-		if (comp->n_links != 0) {
-			comp->links = safe_calloc(comp->n_links,
-			    sizeof (*comp->links));
-		}
-		/* Component setup */
-		switch (comp->info->type) {
-		case ELEC_BATT:
-			comp->batt.chg_rel = 1.0;
-			break;
-		case ELEC_GEN:
-			comp->gen.tgt_volts = comp->info->gen.volts;
-			comp->gen.tgt_freq = comp->info->gen.freq;
-			comp->gen.ctr_rpm = AVG(comp->info->gen.min_rpm,
-			    comp->info->gen.max_rpm);
-			comp->gen.max_stab_U =
-			    comp->gen.ctr_rpm / comp->info->gen.min_rpm;
-			comp->gen.min_stab_U =
-			    comp->gen.ctr_rpm / comp->info->gen.max_rpm;
-			if (comp->info->gen.stab_rate_f > 0) {
-				comp->gen.max_stab_f = comp->gen.ctr_rpm /
-				    comp->info->gen.min_rpm;
-				comp->gen.min_stab_f = comp->gen.ctr_rpm /
-				    comp->info->gen.max_rpm;
-			}
-			break;
-		case ELEC_TRU:
-		case ELEC_INV:
-		case ELEC_LOAD:
-		case ELEC_BUS:
-			break;
-		case ELEC_CB:
-		case ELEC_SHUNT:
-			comp->scb.cur_set = comp->scb.wk_set = true;
-			break;
-		case ELEC_TIE:
-			mutex_init(&comp->tie.lock);
-			break;
-		case ELEC_DIODE:
-		case ELEC_LABEL_BOX:
-			break;
-		}
-#ifdef	LIBELEC_WITH_DRS
-		dr_create_f64(&comp->drs.in_volts, &comp->ro.in_volts,
-		    false, "libelec/comp/%s/in_volts", comp->info->name);
-		dr_create_f64(&comp->drs.out_volts, &comp->ro.out_volts,
-		    false, "libelec/comp/%s/out_volts", comp->info->name);
-		dr_create_f64(&comp->drs.in_amps, &comp->ro.in_amps,
-		    false, "libelec/comp/%s/in_amps", comp->info->name);
-		dr_create_f64(&comp->drs.out_amps, &comp->ro.out_amps,
-		    false, "libelec/comp/%s/out_amps", comp->info->name);
-		dr_create_f64(&comp->drs.in_pwr, &comp->ro.in_pwr,
-		    false, "libelec/comp/%s/in_pwr", comp->info->name);
-		dr_create_f64(&comp->drs.out_pwr, &comp->ro.out_pwr,
-		    false, "libelec/comp/%s/out_pwr", comp->info->name);
-#endif	/* defined(LIBELEC_WITH_DRS) */
-	}
+	for (size_t i = 0; i < sys->num_infos; i++)
+		comp_alloc(sys, &sys->comp_infos[i], &src_i);
 
 	/* Resolve component links */
-	if (!resolve_comp_links(sys))
+	if (!resolve_comp_links(sys) || !check_comp_links(sys))
 		goto errout;
-	check_comp_links(sys);
 	/*
 	 * Network sending is using 16-bit indices
 	 */
@@ -859,39 +877,6 @@ validate_elec_comp_infos_parse(const elec_comp_info_t *infos, size_t n_infos,
 	return (true);
 }
 
-static bool
-validate_elec_comp_infos_start(const elec_sys_t *sys)
-{
-	ASSERT(sys != NULL);
-
-	for (size_t i = 0; i < sys->num_infos; i++) {
-		const elec_comp_info_t *info = &sys->comp_infos[i];
-		/* Validate info structure */
-		switch (info->type) {
-		case ELEC_GEN:
-			if (info->gen.get_rpm == NULL) {
-				logMsg("%s:%d: generator is missing mandatory "
-				    "get_rpm callback", sys->conf_filename,
-				    info->parse_linenum);
-				return (false);
-			}
-			break;
-		case ELEC_BATT:
-		case ELEC_TRU:
-		case ELEC_INV:
-		case ELEC_LOAD:
-		case ELEC_BUS:
-		case ELEC_CB:
-		case ELEC_SHUNT:
-		case ELEC_TIE:
-		case ELEC_DIODE:
-		case ELEC_LABEL_BOX:
-			break;
-		}
-	}
-	return (true);
-}
-
 /**
  * @return True if the network has been started (libelec_sys_start() has
  *	been called successfully), false if the network is stopped.
@@ -917,9 +902,8 @@ libelec_sys_is_started(const elec_sys_t *sys)
 bool
 libelec_sys_can_start(const elec_sys_t *sys)
 {
-	if (sys->started)
-		return (false);
-	return (validate_elec_comp_infos_start(sys));
+	ASSERT(sys != NULL);
+	return (!sys->started);
 }
 
 /**
@@ -947,7 +931,7 @@ libelec_sys_start(elec_sys_t *sys)
 	ASSERT(sys != NULL);
 
 	if (!sys->started) {
-		if (!validate_elec_comp_infos_start(sys))
+		if (!libelec_sys_can_start(sys))
 			return (false);
 #ifndef	LIBELEC_SLOW_DEBUG
 		worker_init(&sys->worker, elec_sys_worker, EXEC_INTVAL, sys,
@@ -2557,6 +2541,31 @@ libelec_comp_is_powered(const elec_comp_t *comp)
 }
 
 /**
+ * @return The current efficiency of the component `comp`. This MUST be a
+ *	component of type \ref ELEC_GEN, \ref ELEC_TRU or \ref ELEC_INV.
+ */
+double
+libelec_comp_get_eff(const elec_comp_t *comp)
+{
+	double eff;
+	ASSERT(comp != NULL);
+	switch (comp->info->type) {
+	case ELEC_GEN:
+		mutex_enter(&((elec_comp_t *)comp)->gen.lock);
+		eff = comp->gen.eff;
+		mutex_exit(&((elec_comp_t *)comp)->gen.lock);
+		break;
+	case ELEC_TRU:
+	case ELEC_INV:
+		eff = comp->tru.eff;
+		break;
+	default:
+		VERIFY_FAIL();
+	}
+	return (eff);
+}
+
+/**
  * Sets a component's failed status. The behavior of a failed component
  * depends on its type:
  *	- `ELEC_BATT`: provides no output voltage and cannot be charged.
@@ -2743,9 +2752,9 @@ libelec_comp_get_userinfo(const elec_comp_t *comp)
  *	be stopped before attempting to reconfigure it.
  * @param batt The battery for which to configure the callback.
  *	Must be a component of type \ref ELEC_BATT.
- * @param cb The callback to set. You may pass `NULL` here, but note
- *	that a battery MUST have a temperature callback configured
- *	before the network can be started using libelec_sys_start().
+ * @param cb The callback to set. You may pass `NULL` here to remove
+ *	the callback. You may also use libelec_batt_set_temp() to set
+ *	the battery's temperature directly.
  * @see elec_get_temp_cb_t
  */
 void
@@ -2780,10 +2789,11 @@ libelec_batt_get_temp_cb(const elec_comp_t *batt)
  *	be stopped before attempting to reconfigure it.
  * @param batt The generator for which to configure the callback.
  *	Must be a component of type \ref ELEC_GEN.
- * @param cb The callback to set. You may pass `NULL` here, but note
- *	that a generator MUST have an rpm callback configured before
- *	the network can be started using libelec_sys_start().
+ * @param cb The callback to set. You may pass `NULL` here to remove
+ *	the calllback. You can use libelec_gen_set_rpm() to set the
+ *	rpm directly.
  * @see elec_get_rpm_cb_t
+ * @see libelec_gen_set_rpm()
  */
 void
 libelec_gen_set_rpm_cb(elec_comp_t *gen, elec_get_rpm_cb_t cb)
@@ -2936,18 +2946,18 @@ network_reset(elec_sys_t *sys, double d_t)
 static void
 network_update_gen(elec_comp_t *gen, double d_t)
 {
-	double rpm;
-
 	ASSERT(gen != NULL);
 	ASSERT(gen->info != NULL);
 	ASSERT3U(gen->info->type, ==, ELEC_GEN);
-	ASSERT(gen->info->gen.get_rpm != NULL);
 
-	rpm = gen->info->gen.get_rpm(gen, gen->info->userinfo);
-	ASSERT(!isnan(rpm));
-	rpm = MAX(rpm, 1e-3);
-	gen->gen.rpm = rpm;
-	if (rpm <= 1e-3) {
+	if (gen->info->gen.get_rpm != NULL) {
+		double rpm = gen->info->gen.get_rpm(gen, gen->info->userinfo);
+		ASSERT(!isnan(rpm));
+		mutex_enter(&gen->gen.lock);
+		gen->gen.rpm = MAX(rpm, GEN_MIN_RPM);
+		mutex_exit(&gen->gen.lock);
+	}
+	if (gen->gen.rpm <= GEN_MIN_RPM) {
 		gen->gen.stab_factor_U = 1;
 		gen->gen.stab_factor_f = 1;
 		gen->rw.in_volts = 0;
@@ -2961,7 +2971,7 @@ network_update_gen(elec_comp_t *gen, double d_t)
 	 * that the CSD takes a little time to adjust to rpm changes.
 	 */
 	if (gen->info->gen.stab_rate_U > 0) {
-		double stab_factor_U = clamp(gen->gen.ctr_rpm / rpm,
+		double stab_factor_U = clamp(gen->gen.ctr_rpm / gen->gen.rpm,
 		    gen->gen.min_stab_U, gen->gen.max_stab_U);
 		double stab_rate_mod =
 		    clamp(1 + crc64_rand_normal(0.1), 0.1, 10);
@@ -2971,7 +2981,7 @@ network_update_gen(elec_comp_t *gen, double d_t)
 		gen->gen.stab_factor_U = 1;
 	}
 	if (gen->info->gen.stab_rate_f > 0) {
-		double stab_factor_f = clamp(gen->gen.ctr_rpm / rpm,
+		double stab_factor_f = clamp(gen->gen.ctr_rpm / gen->gen.rpm,
 		    gen->gen.min_stab_f, gen->gen.max_stab_f);
 		double stab_rate_mod =
 		    clamp(1 + crc64_rand_normal(0.1), 0.1, 10);
@@ -2981,15 +2991,16 @@ network_update_gen(elec_comp_t *gen, double d_t)
 		gen->gen.stab_factor_f = 1;
 	}
 	if (!gen->rw.failed) {
-		if (rpm < gen->info->gen.exc_rpm) {
+		if (gen->gen.rpm < gen->info->gen.exc_rpm) {
 			gen->rw.in_volts = 0;
 			gen->rw.in_freq = 0;
 		} else {
 			ASSERT(gen->gen.tgt_volts != 0);
-			gen->rw.in_volts = (rpm / gen->gen.ctr_rpm) *
+			gen->rw.in_volts = (gen->gen.rpm / gen->gen.ctr_rpm) *
 			    gen->gen.stab_factor_U * gen->gen.tgt_volts;
 			if (gen->gen.tgt_freq != 0) {
-				gen->rw.in_freq = (rpm / gen->gen.ctr_rpm) *
+				gen->rw.in_freq = (gen->gen.rpm /
+				    gen->gen.ctr_rpm) *
 				    gen->gen.stab_factor_f * gen->gen.tgt_freq;
 			}
 		}
@@ -3011,10 +3022,15 @@ network_update_batt(elec_comp_t *batt, double d_t)
 	ASSERT(batt != NULL);
 	ASSERT(batt->info != NULL);
 	ASSERT3U(batt->info->type, ==, ELEC_BATT);
-	ASSERT(batt->info->batt.get_temp != NULL);
 
-	batt->batt.T = batt->info->batt.get_temp(batt, batt->info->userinfo);
-	ASSERT3F(batt->batt.T, >, 0);
+	if (batt->info->batt.get_temp != NULL) {
+		double T = batt->info->batt.get_temp(batt,
+		    batt->info->userinfo);
+		ASSERT3F(T, >, 0);
+		mutex_enter(&batt->batt.lock);
+		batt->batt.T = T;
+		mutex_exit(&batt->batt.lock);
+	}
 	temp_coeff = fx_lin_multi2(batt->batt.T, batt_temp_energy_curve,
 	    ARRAY_NUM_ELEM(batt_temp_energy_curve), true);
 
@@ -4263,6 +4279,11 @@ comp_free(elec_comp_t *comp)
 	dr_delete(&comp->drs.out_pwr);
 #endif	/* defined(LIBELEC_WITH_DRS) */
 
+	if (comp->info->type == ELEC_BATT)
+		mutex_destroy(&comp->batt.lock);
+	else if (comp->info->type == ELEC_GEN)
+		mutex_destroy(&comp->gen.lock);
+
 	ZERO_FREE_N(comp->links, comp->n_links);
 	if (comp->info->type == ELEC_TIE) {
 		free(comp->tie.cur_state);
@@ -4623,6 +4644,57 @@ out:
 }
 
 /**
+ * Sets the generator's RPM value.
+ * @param gen The generator for which to set the rpm. This MUST be a
+ *	component of type \ref ELEC_GEN.
+ * @param rpm The RPM to set on the generator.
+ * @note Despite its name, the units of `rpm` are arbitrary. You can use
+ *	whatever units you prefer. You simply need to be consistent with
+ *	the `EXC_RPM`, `MIN_RPM` and `MAX_RPM` stanzas when defining
+ *	the generator in the config file.
+ * @see libelec_gen_get_rpm()
+ */
+void
+libelec_gen_set_rpm(elec_comp_t *gen, double rpm)
+{
+	ASSERT(gen != NULL);
+	ASSERT(gen->info != NULL);
+	ASSERT3U(gen->info->type, ==, ELEC_GEN);
+	ASSERT_MSG(gen->info->gen.get_rpm == NULL,
+	    "Attempted to call libelec_gen_set_rpm() for generator %s, "
+	    "however this generator already had an rpm callback set using "
+	    "libelec_gen_set_rpm_cb(). You may NOT mix both mechanisms for "
+	    "setting a generator's speed. Either set the speed directly "
+	    "using libelec_gen_set_rpm() -OR- use the callback method "
+	    "using libelec_gen_set_rpm_cb(), but not both.", gen->info->name);
+	mutex_enter(&gen->gen.lock);
+	gen->gen.rpm = rpm;
+	mutex_exit(&gen->gen.lock);
+}
+
+/**
+ * @return The current generator RPM of `gen`. This MUST be a component of
+ *	type \ref ELEC_GEN.
+ * @note Despite its name, the units of speed are arbitrary and are
+ *	dependent on what you set with either libelec_gen_set_rpm(), or
+ *	what the elec_gen_rpm_cb_t callback returned for the generator.
+ * @see libelec_gen_set_rpm()
+ * @see elec_gen_rpm_cb_t
+ */
+double
+libelec_gen_get_rpm(const elec_comp_t *gen)
+{
+	double rpm;
+	ASSERT(gen != NULL);
+	ASSERT(gen->info != NULL);
+	ASSERT3U(gen->info->type, ==, ELEC_GEN);
+	mutex_enter(&((elec_comp_t *)gen)->gen.lock);
+	rpm = gen->gen.rpm;
+	mutex_exit(&((elec_comp_t *)gen)->gen.lock);
+	return (rpm);
+}
+
+/**
  * @return The relative state-of-charge of the battery `batt`. This
  *	MUST be a component of type \ref ELEC_BATT.
  * @see libelec_batt_set_chg_rel()
@@ -4656,6 +4728,43 @@ libelec_batt_set_chg_rel(elec_comp_t *batt, double chg_rel)
 	/* To prevent over-charging if the previous cycle was charging */
 	batt->batt.rechg_W = 0;
 	mutex_exit(&batt->sys->worker_interlock);
+}
+
+/**
+ * @return The temperature of the battery `batt` in Kelvin. This
+ *	MUST be a component of type \ref ELEC_BATT.
+ * @see libelec_batt_set_temp()
+ */
+double
+libelec_batt_get_temp(const elec_comp_t *batt)
+{
+	double T;
+	ASSERT(batt != NULL);
+	ASSERT(batt->info != NULL);
+	ASSERT3U(batt->info->type, ==, ELEC_BATT);
+	mutex_enter(&((elec_comp_t *)batt)->batt.lock);
+	T = batt->batt.T;
+	mutex_exit(&((elec_comp_t *)batt)->batt.lock);
+	return (T);
+}
+
+/**
+ * Sets the temperature of a battery. This affects the battery's capability
+ * to output current and total energy content, due to temperature
+ * significantly affecting how the chemistry inside of the battery behaves.
+ * @param T The new temperature of the battery in Kelvin. Must NOT be negative.
+ * @see libelec_batt_get_temp()
+ */
+void
+libelec_batt_set_temp(elec_comp_t *batt, double T)
+{
+	ASSERT(batt != NULL);
+	ASSERT(batt->info != NULL);
+	ASSERT3U(batt->info->type, ==, ELEC_BATT);
+	ASSERT3F(T, >, 0);
+	mutex_enter(&batt->batt.lock);
+	batt->batt.T = T;
+	mutex_exit(&batt->batt.lock);
 }
 
 /**

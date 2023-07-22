@@ -198,3 +198,10 @@ is to be simulated.
 
 See [Configuration File Format](ConfFileFormat.md) for more information
 on how the configuration file must be constructed.
+
+## nettest Utility
+
+libelec provides a command-line utility, which allows you to load, run
+and test your electrical network definitions outside of the simulator.
+
+See [nettest's README](nettest/README.md) for more information.

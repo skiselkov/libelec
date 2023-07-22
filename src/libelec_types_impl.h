@@ -121,7 +121,8 @@ typedef struct {
 	double		chg_rel;
 	double		rechg_W;
 	LIBELEC_SER_END_MARKER;
-	double		T;		/* Kelvin */
+	mutex_t		lock;
+	double		T;		/* Kelvin, protected by `lock` above */
 } elec_batt_t;
 
 typedef struct {
@@ -131,7 +132,8 @@ typedef struct {
 	double		min_stab_f;
 	double		max_stab_f;
 	double		eff;
-	double		rpm;
+	mutex_t		lock;
+	double		rpm;		/* protected by `lock` above */
 	LIBELEC_SER_START_MARKER;
 	double		tgt_volts;
 	double		tgt_freq;

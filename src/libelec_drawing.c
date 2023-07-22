@@ -922,14 +922,8 @@ draw_comp_bg(cairo_t *cr, double pos_scale, vect2_t pos, vect2_t sz)
 
 	ASSERT(cr != NULL);
 
-#ifdef	LIBELEC_WITH_GL
-	mt_cairo_render_rounded_rectangle(cr, PX(pos.x - sz.x / 2),
+	cairo_utils_rounded_rect(cr, PX(pos.x - sz.x / 2),
 	    PX(pos.y - sz.y / 2), PX(sz.x), PX(sz.y), PX(0.5));
-#else	/* !defined(LIBELEC_WITH_GL) */
-	UNUSED(pos_scale);
-	UNUSED(pos);
-	UNUSED(sz);
-#endif	/* !defined(LIBELEC_WITH_GL) */
 	path = cairo_copy_path(cr);
 	cairo_set_source_rgb(cr, COMP_INFO_BG_RGB);
 	cairo_fill(cr);
