@@ -8,6 +8,8 @@ cmake_minimum_required(VERSION 3.9)
 
 project(nettest C)
 
+option(READLINE_INSTALL_PREFIX "Where GNU readline's headers and libs are")
+
 # Source file setup
 file(GLOB LIBACFUTILS "${CMAKE_SOURCE_DIR}/libacfutils-redist-v0.37")
 set(ACFUTILS_DLL_VERSION "37")
@@ -112,6 +114,7 @@ endif()
 
 if(MINGW)
 	set(PLATFORM_LIBS
+	    "-static"
 	    "${LIBACFUTILS}/${PLAT_SHORT}/lib/libcairo.a"
 	    "${LIBACFUTILS}/${PLAT_SHORT}/lib/libcurl.a"
 	    "${LIBACFUTILS}/${PLAT_SHORT}/lib/libpixman-1.a"
@@ -120,8 +123,7 @@ if(MINGW)
 	    "${LIBACFUTILS}/${PLAT_SHORT}/lib/libssl.a"
 	    "${LIBACFUTILS}/${PLAT_SHORT}/lib/libcrypto.a"
 	    "${LIBACFUTILS}/${PLAT_SHORT}/lib/libz.a"
-	    # Try to link all of the platform libs as static
-	    "-Wl,-Bstatic -lssp -Wl,-Bdynamic"
+	    "-lssp"
 	    "-lws2_32"
 	    "-lcrypt32"
 	    "-ldbghelp"
@@ -152,19 +154,45 @@ else()
 	    )
 endif()
 
-find_path(READLINE_HDR "readline/readline.h")
-find_library(READLINE_LIB "libreadline.a")
+if(READLINE_INSTALL_PREFIX)
+	set(READLINE_LIB_PREFIX "${READLINE_INSTALL_PREFIX}/lib/")
+	set(READLINE_HDR "${READLINE_INSTALL_PREFIX}/include")
+elseif(MINGW)
+	# If the option wasn't specified, try to fall back to using our
+	# bundled GNU readline
+	set(READLINE_LIB_PREFIX "${CMAKE_SOURCE_DIR}/mingw-readline/lib/")
+	set(READLINE_HDR "${CMAKE_SOURCE_DIR}/mingw-readline/include")
+else()
+	find_path(READLINE_HDR "readline/readline.h")
+endif()
+
+find_library(READLINE_LIB "libreadline.a" ${READLINE_LIB_PREFIX})
 if(NOT READLINE_LIB)
-	find_library(READLINE_LIB "readline")
+	# Fall back to trying the dynamic version of readline
+	find_library(READLINE_LIB "readline" ${READLINE_LIB_PREFIX})
+elseif(MINGW)
+	# Under MinGW, we use the MSYS2 version of readline, which depends
+	# on libncurses, and which in turn depends on winpthreads (due to
+	# clock_gettime() being implemented there in MinGW).
+	find_library(NCURSES_LIB "libncurses.a" ${READLINE_LIB_PREFIX})
+	find_library(WINPTHREAD_LIB "libwinpthread.a")
+	set(READLINE_PLATFORM_LIBS ${NCURSES_LIB} ${WINPTHREAD_LIB})
 elseif(APPLE)
-	find_library(TINFO_LIB "libncurses.a")
+	# On macOS, static GNU readline depends on libncurses
+	find_library(READLINE_PLATFORM_LIBS "libncurses.a")
 elseif(UNIX)
-	find_library(TINFO_LIB "libtinfo.a")
+	# On Linux, static GNU readline depends on libtinfo
+	find_library(READLINE_PLATFORM_LIBS "libtinfo.a")
 endif()
 
 if(READLINE_HDR AND READLINE_LIB)
+	message("GNU readline found")
 	add_definitions(-DWITH_READLINE)
-	set(PLATFORM_LIBS ${PLATFORM_LIBS} ${READLINE_LIB} ${TINFO_LIB})
+	include_directories(nettest PUBLIC "${READLINE_HDR}")
+	set(PLATFORM_LIBS ${PLATFORM_LIBS}
+	    ${READLINE_LIB} ${READLINE_PLATFORM_LIBS})
+else()
+	message("GNU readline NOT found")
 endif()
 
 target_link_libraries(nettest
