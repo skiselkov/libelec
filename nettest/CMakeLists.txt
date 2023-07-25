@@ -176,6 +176,10 @@ elseif(MINGW)
 	# clock_gettime() being implemented there in MinGW).
 	find_library(NCURSES_LIB "libncurses.a" ${READLINE_LIB_PREFIX})
 	find_library(WINPTHREAD_LIB "libwinpthread.a")
+	if(NOT WINPTHREAD_LIB)
+		find_library(WINPTHREAD_LIB "libwinpthread.a"
+		    ${READLINE_LIB_PREFIX})
+	endif()
 	set(READLINE_PLATFORM_LIBS ${NCURSES_LIB} ${WINPTHREAD_LIB})
 elseif(APPLE)
 	# On macOS, static GNU readline depends on libncurses
