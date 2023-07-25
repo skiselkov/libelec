@@ -1763,6 +1763,10 @@ static const cmd_part_t *cmd_parts_top[] = {
 		.keyword = "draw"
 	    }
 	}
+    },
+    &(cmd_part_t){
+	.type = CMD_PART_KEYWORD,
+	.keyword = "quit"
     }
 };
 
