@@ -525,7 +525,7 @@ libelec_get_comp_infos(const elec_sys_t *sys, size_t *num_infos)
 	return (sys->comp_infos);
 }
 
-static void
+static bool
 comp_alloc(elec_sys_t *sys, elec_comp_info_t *info, unsigned *src_i)
 {
 	elec_comp_t *comp = safe_calloc(1, sizeof (*comp));
@@ -622,6 +622,15 @@ comp_alloc(elec_sys_t *sys, elec_comp_info_t *info, unsigned *src_i)
 	if (comp->n_links != 0)
 		comp->links = safe_calloc(comp->n_links, sizeof (*comp->links));
 	/*
+	 * Check if we're trying to create too many sources
+	 */
+	if (comp->src_idx > ELEC_MAX_SRCS) {
+		logMsg("%s:%d: too many electrical sources (max: 64).",
+		    sys->conf_filename, info->parse_linenum);
+		comp_free(comp);
+		return (false);
+	}
+	/*
 	 * Insert the component into the relevant type-specific lists
 	 */
 	if (comp->info->type == ELEC_BATT || comp->info->type == ELEC_GEN)
@@ -632,19 +641,21 @@ comp_alloc(elec_sys_t *sys, elec_comp_info_t *info, unsigned *src_i)
 	 * If dataref exposing is enabled, create those now.
 	 */
 #ifdef	LIBELEC_WITH_DRS
-		dr_create_f64(&comp->drs.in_volts, &comp->ro.in_volts,
-		    false, "libelec/comp/%s/in_volts", comp->info->name);
-		dr_create_f64(&comp->drs.out_volts, &comp->ro.out_volts,
-		    false, "libelec/comp/%s/out_volts", comp->info->name);
-		dr_create_f64(&comp->drs.in_amps, &comp->ro.in_amps,
-		    false, "libelec/comp/%s/in_amps", comp->info->name);
-		dr_create_f64(&comp->drs.out_amps, &comp->ro.out_amps,
-		    false, "libelec/comp/%s/out_amps", comp->info->name);
-		dr_create_f64(&comp->drs.in_pwr, &comp->ro.in_pwr,
-		    false, "libelec/comp/%s/in_pwr", comp->info->name);
-		dr_create_f64(&comp->drs.out_pwr, &comp->ro.out_pwr,
-		    false, "libelec/comp/%s/out_pwr", comp->info->name);
+	dr_create_f64(&comp->drs.in_volts, &comp->ro.in_volts,
+	    false, "libelec/comp/%s/in_volts", comp->info->name);
+	dr_create_f64(&comp->drs.out_volts, &comp->ro.out_volts,
+	    false, "libelec/comp/%s/out_volts", comp->info->name);
+	dr_create_f64(&comp->drs.in_amps, &comp->ro.in_amps,
+	    false, "libelec/comp/%s/in_amps", comp->info->name);
+	dr_create_f64(&comp->drs.out_amps, &comp->ro.out_amps,
+	    false, "libelec/comp/%s/out_amps", comp->info->name);
+	dr_create_f64(&comp->drs.in_pwr, &comp->ro.in_pwr,
+	    false, "libelec/comp/%s/in_pwr", comp->info->name);
+	dr_create_f64(&comp->drs.out_pwr, &comp->ro.out_pwr,
+	    false, "libelec/comp/%s/out_pwr", comp->info->name);
 #endif	/* defined(LIBELEC_WITH_DRS) */
+
+	return (true);
 }
 
 /**
@@ -741,9 +752,10 @@ libelec_new(const char *filename)
 	mutex_init(&sys->paused_lock);
 	sys->time_factor = 1;
 
-	for (size_t i = 0; i < sys->num_infos; i++)
-		comp_alloc(sys, &sys->comp_infos[i], &src_i);
-
+	for (size_t i = 0; i < sys->num_infos; i++) {
+		if (!comp_alloc(sys, &sys->comp_infos[i], &src_i))
+			goto errout;
+	}
 	/* Resolve component links */
 	if (!resolve_comp_links(sys) || !check_comp_links(sys))
 		goto errout;
