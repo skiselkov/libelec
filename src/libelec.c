@@ -201,7 +201,7 @@ check_upstream(const elec_comp_t *comp, const elec_comp_t *src,
 {
 	ASSERT(comp != NULL);
 	ASSERT(src != NULL);
-	ASSERT3U(src->src_idx, <, MAX_SRCS);
+	ASSERT3U(src->src_idx, <, ELEC_MAX_SRCS);
 	ASSERT(upstream != NULL);
 
 	for (unsigned i = 0; i < comp->n_links; i++) {
@@ -231,7 +231,7 @@ sum_link_amps(const elec_link_t *link)
 	double amps = 0;
 
 	ASSERT(link != NULL);
-	for (unsigned i = 0; i < MAX_SRCS; i++)
+	for (unsigned i = 0; i < ELEC_MAX_SRCS; i++)
 		amps += link->out_amps[i];
 
 	return (amps);
@@ -3270,7 +3270,7 @@ add_src_up(elec_comp_t *comp, elec_comp_t *src, const elec_comp_t *upstream)
 	ASSERT(upstream != NULL);
 
 	ASSERT0(src->src_mask & (1 << src->src_idx));
-	ASSERT3U(comp->n_srcs, <, MAX_SRCS);
+	ASSERT3U(comp->n_srcs, <, ELEC_MAX_SRCS);
 	comp->srcs[comp->n_srcs] = src;
 	comp->n_srcs++;
 	ASSERT3F(src->info->int_R, >, 0);
@@ -4356,15 +4356,9 @@ libelec_cb_get_temp(const elec_comp_t *comp)
  *	this list become untied.
  * @see \ref ELEC_TIE
  */
-#if	defined(__cplusplus) || defined(_MSC_VER)
 void
 libelec_tie_set_list(elec_comp_t *comp, size_t list_len,
-    elec_comp_t *const*bus_list)
-#else	/* !defined(__cplusplus) && !defined(_MSC_VER) */
-void
-libelec_tie_set_list(elec_comp_t *comp, size_t list_len,
-    elec_comp_t *const bus_list[list_len])
-#endif	/* !defined(__cplusplus) && !defined(_MSC_VER) */
+    elec_comp_t *const bus_list[STATIC_ARRAY_LEN_ARG(list_len)])
 {
 	bool *new_state;
 
@@ -4525,15 +4519,9 @@ libelec_tie_get_all(elec_comp_t *comp)
  * @return The actual number of buses filled into `bus_list`.
  * @see libelec_tie_get_num_buses()
  */
-#if	defined(__cplusplus) || defined(_MSC_VER)
 size_t
 libelec_tie_get_list(elec_comp_t *comp, size_t cap,
-    elec_comp_t **bus_list)
-#else	/* !defined(__cplusplus) && !defined(_MSC_VER) */
-size_t
-libelec_tie_get_list(elec_comp_t *comp, size_t cap,
-    elec_comp_t *bus_list[static cap])
-#endif	/* !defined(__cplusplus) && !defined(_MSC_VER) */
+    elec_comp_t *bus_list[STATIC_ARRAY_LEN_ARG(cap)])
 {
 	size_t n_tied = 0;
 

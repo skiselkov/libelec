@@ -48,26 +48,26 @@ make_comp_name(const char *in_name, char out_name[MAX_NAME_LEN])
 }
 
 static void
-get_srcs(const elec_comp_t *comp, elec_comp_t *srcs[MAX_SRCS])
+get_srcs(const elec_comp_t *comp, elec_comp_t *srcs[ELEC_MAX_SRCS])
 {
 	ASSERT(comp != NULL);
 	ASSERT(srcs != NULL);
 
 	mutex_enter(&((elec_comp_t *)comp)->rw_ro_lock);
-	memcpy(srcs, comp->srcs_vis, sizeof (*srcs) * MAX_SRCS);
+	memcpy(srcs, comp->srcs_ext, sizeof (*srcs) * ELEC_MAX_SRCS);
 	mutex_exit(&((elec_comp_t *)comp)->rw_ro_lock);
 }
 
 static unsigned
-count_srcs(elec_comp_t *srcs[MAX_SRCS])
+count_srcs(elec_comp_t *srcs[ELEC_MAX_SRCS])
 {
 	ASSERT(srcs != NULL);
 
-	for (unsigned n_srcs = 0; n_srcs < MAX_SRCS; n_srcs++) {
+	for (unsigned n_srcs = 0; n_srcs < ELEC_MAX_SRCS; n_srcs++) {
 		if (srcs[n_srcs] == NULL)
 			return (n_srcs);
 	}
-	return (MAX_SRCS);
+	return (ELEC_MAX_SRCS);
 }
 
 static void
@@ -205,7 +205,7 @@ draw_src_path(cairo_t *cr, cairo_path_t *path, const elec_comp_t *comp)
 {
 	cairo_pattern_t *pat;
 	vect3_t color;
-	elec_comp_t *srcs[MAX_SRCS];
+	elec_comp_t *srcs[ELEC_MAX_SRCS];
 	unsigned n_srcs;
 
 	ASSERT(cr != NULL);
@@ -954,7 +954,7 @@ draw_comp_info(const elec_comp_t *comp, cairo_t *cr, double pos_scale,
 {
 	bool ac;
 	double U_in, I_in, W_in, U_out, I_out, W_out, f;
-	elec_comp_t *srcs[MAX_SRCS];
+	elec_comp_t *srcs[ELEC_MAX_SRCS];
 	unsigned n_srcs;
 
 	ASSERT(comp != NULL);

@@ -26,6 +26,20 @@
 extern "C" {
 #endif
 
+#if	!defined(STATIC_ARRAY_LEN_ARG) && !defined(CONST_ARRAY_LEN_ARG)
+#if	__STDC_VERSION__ >= 199901L && !defined(_MSC_VER)
+#define	STATIC_ARRAY_LEN_ARG(len)	static len
+#define	CONST_ARRAY_LEN_ARG(len)	static len
+#else	/* __STDC_VERSION__ < 199901L || defined(_MSC_VER) */
+#define	STATIC_ARRAY_LEN_ARG(len)
+#define	CONST_ARRAY_LEN_ARG(len)	len
+#endif	/* __STDC_VERSION__ < 199901L || defined(_MSC_VER) */
+#endif	/* !defined(STATIC_ARRAY_LEN_ARG) && !defined(CONST_ARRAY_LEN_ARG) */
+
+enum {
+    ELEC_MAX_SRCS = 64
+};
+
 typedef struct elec_sys_s elec_sys_t;
 typedef struct elec_comp_s elec_comp_t;
 typedef struct elec_comp_info_s elec_comp_info_t;
@@ -501,24 +515,14 @@ bool libelec_cb_get(const elec_comp_t *comp);
 double libelec_cb_get_temp(const elec_comp_t *comp);
 
 /* Ties */
-#if	defined(__cplusplus) || defined(_MSC_VER)
 void libelec_tie_set_list(elec_comp_t *comp, size_t list_len,
-    elec_comp_t *const*bus_list);
-#else	/* !defined(__cplusplus) && !defined(_MSC_VER) */
-void libelec_tie_set_list(elec_comp_t *comp, size_t list_len,
-    elec_comp_t *const bus_list[list_len]);
-#endif	/* !defined(__cplusplus) && !defined(_MSC_VER) */
+    elec_comp_t *const bus_list[STATIC_ARRAY_LEN_ARG(list_len)]);
 void libelec_tie_set(elec_comp_t *comp, ...) SENTINEL_ATTR;
 void libelec_tie_set_v(elec_comp_t *comp, va_list ap);
 void libelec_tie_set_all(elec_comp_t *comp, bool tied);
 bool libelec_tie_get_all(elec_comp_t *comp);
-#if	defined(__cplusplus) || defined(_MSC_VER)
 size_t libelec_tie_get_list(elec_comp_t *comp, size_t cap,
-    elec_comp_t **bus_list);
-#else	/* !defined(__cplusplus) && !defined(_MSC_VER) */
-size_t libelec_tie_get_list(elec_comp_t *comp, size_t cap,
-    elec_comp_t *bus_list[static cap]);
-#endif	/* !defined(__cplusplus) && !defined(_MSC_VER) */
+    elec_comp_t *bus_list[STATIC_ARRAY_LEN_ARG(cap)]);
 size_t libelec_tie_get_num_buses(const elec_comp_t *comp);
 /*
  * Due to default argument promotion and va_start underneath,

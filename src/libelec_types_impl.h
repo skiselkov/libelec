@@ -59,8 +59,6 @@ extern "C" {
 	} while (0)
 
 
-#define	MAX_SRCS	24
-
 struct elec_sys_s {
 	bool		started;
 	worker_t	worker;
@@ -192,8 +190,8 @@ typedef struct {
 
 typedef struct {
 	elec_comp_t		*comp;
-	double			out_amps[MAX_SRCS];
-	elec_comp_t		*srcs[MAX_SRCS];
+	double			out_amps[ELEC_MAX_SRCS];
+	elec_comp_t		*srcs[ELEC_MAX_SRCS];
 } elec_link_t;
 
 struct elec_comp_s {
@@ -239,12 +237,15 @@ struct elec_comp_s {
 
 	double			src_int_cond_total; /* Conductance, abstract */
 	uint64_t		src_mask;
-	elec_comp_t		*srcs[MAX_SRCS];
+	elec_comp_t		*srcs[ELEC_MAX_SRCS];
 	unsigned		n_srcs;
 	/*
-	 * Version for visualizer to avoid blinking when `src' gets reset.
+	 * Version for external consumers, which is only updated after a
+	 * network integration pass. This avoids e.g. blinking when the
+	 * when `srcs' array gets reset during the integration pass.
+	 * Protected by rw_ro_lock.
 	 */
-	elec_comp_t		*srcs_vis[MAX_SRCS];
+	elec_comp_t		*srcs_ext[ELEC_MAX_SRCS];
 
 	union {
 		elec_batt_t	batt;
