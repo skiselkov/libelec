@@ -2567,6 +2567,24 @@ libelec_comp_get_eff(const elec_comp_t *comp)
 	return (eff);
 }
 
+unsigned
+libelec_comp_get_srcs(const elec_comp_t *comp,
+    elec_comp_t *srcs[CONST_ARRAY_LEN_ARG(ELEC_MAX_SRCS)])
+{
+	ASSERT(comp != NULL);
+	ASSERT(srcs != NULL);
+
+	mutex_enter((mutex_t *)&comp->rw_ro_lock);
+	memcpy(srcs, comp->srcs_ext, sizeof (elec_comp_t *) * ELEC_MAX_SRCS);
+	mutex_exit((mutex_t *)&comp->rw_ro_lock);
+
+	for (unsigned i = 0; i < ELEC_MAX_SRCS; i++) {
+		if (srcs[i] == NULL)
+			return (i);
+	}
+	return (ELEC_MAX_SRCS);
+}
+
 /**
  * Sets a component's failed status. The behavior of a failed component
  * depends on its type:
@@ -2890,9 +2908,9 @@ network_reset(elec_sys_t *sys, double d_t)
 
 	for (elec_comp_t *comp = list_head(&sys->comps); comp != NULL;
 	    comp = list_next(&sys->comps, comp)) {
-		elec_comp_t *srcs_vis[MAX_SRCS];
+		elec_comp_t *srcs_ext[ELEC_MAX_SRCS];
 
-		memcpy(srcs_vis, comp->srcs, sizeof (srcs_vis));
+		memcpy(srcs_ext, comp->srcs, sizeof (srcs_ext));
 
 		comp->rw.in_volts = 0;
 		comp->rw.in_pwr = 0;
@@ -2915,7 +2933,7 @@ network_reset(elec_sys_t *sys, double d_t)
 		comp->rw.failed = comp->ro.failed;
 		comp->rw.shorted = comp->ro.shorted;
 		update_short_leak_factor(comp, d_t);
-		memcpy(comp->srcs_vis, srcs_vis, sizeof (comp->srcs_vis));
+		memcpy(comp->srcs_ext, srcs_ext, sizeof (comp->srcs_ext));
 		mutex_exit(&comp->rw_ro_lock);
 
 		comp->integ_mask = 0;

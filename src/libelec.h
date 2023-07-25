@@ -487,6 +487,8 @@ double libelec_comp_get_out_freq(const elec_comp_t *comp);
 double libelec_comp_get_incap_volts(const elec_comp_t *comp);
 bool libelec_comp_is_powered(const elec_comp_t *comp);
 double libelec_comp_get_eff(const elec_comp_t *gen);
+unsigned libelec_comp_get_srcs(const elec_comp_t *comp,
+    elec_comp_t *srcs[CONST_ARRAY_LEN_ARG(ELEC_MAX_SRCS)]);
 
 /* Failures */
 void libelec_comp_set_failed(elec_comp_t *comp, bool failed);
