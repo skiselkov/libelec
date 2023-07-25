@@ -558,6 +558,8 @@ comp_alloc(elec_sys_t *sys, elec_comp_info_t *info, unsigned *src_i)
 		comp->batt.T = C2KELVIN(15);
 		break;
 	case ELEC_GEN:
+		comp->src_idx = *src_i;
+		(*src_i)++;
 		mutex_init(&comp->gen.lock);
 		comp->gen.tgt_volts = comp->info->gen.volts;
 		comp->gen.tgt_freq = comp->info->gen.freq;
