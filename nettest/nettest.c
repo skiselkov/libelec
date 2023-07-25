@@ -1045,7 +1045,7 @@ print_loads_i(elec_comp_t *comp, void *userinfo)
 	    PRINT_AMPS("I_out", libelec_comp_get_out_amps(comp)),
 	    PRINT_PWR("W_out", libelec_comp_get_out_pwr(comp)),
 	    PRINT_VOLTS("U_c_in", libelec_comp_get_incap_volts(comp)),
-	    PRINT_VOLTS("I_in", libelec_comp_get_in_amps(comp)),
+	    PRINT_AMPS("I_in", libelec_comp_get_in_amps(comp)),
 	    NULL);
 }
 
