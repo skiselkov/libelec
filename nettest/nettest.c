@@ -1498,6 +1498,18 @@ print_help(const char *cmd)
 		    "image size is\n"
 		    "    2048x2048 pixels.\n");
 	}
+	if (cmd == NULL) {
+		printf("\n"
+		    "=========================\n"
+		    "==== PROGRAM CONTROL ====\n"
+		    "=========================\n");
+	}
+	if (cmd == NULL || lacf_strcasecmp(cmd, "quit") == 0) {
+		cmd_found = true;
+		printf(
+		    "quit\n"
+		    "    Quits nettest.\n");
+	}
 	if (cmd != NULL && !cmd_found) {
 		fprintf(stderr, "Error: unknown command \"%s\". "
 		    "Try typing \"help\".\n", cmd);
@@ -1506,7 +1518,7 @@ print_help(const char *cmd)
 
 #ifdef	WITH_READLINE
 
-enum { MAX_SUBCMD_PARTS = 8 };
+enum { MAX_SUBCMD_PARTS = 12 };
 
 #define	COMP_TYPE_ANY_MASK \
 	((1 << ELEC_BATT) | (1 << ELEC_GEN) | (1 << ELEC_TRU) | \
@@ -1761,6 +1773,10 @@ static const cmd_part_t *cmd_parts_top[] = {
 	    &(cmd_part_t){
 		.type = CMD_PART_KEYWORD,
 		.keyword = "draw"
+	    },
+	    &(cmd_part_t){
+		.type = CMD_PART_KEYWORD,
+		.keyword = "quit"
 	    }
 	}
     },
