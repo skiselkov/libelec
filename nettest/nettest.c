@@ -179,10 +179,90 @@ print_version(void)
 	    LIBELEC_VERSION, BUILD_TIMESTAMP);
 }
 
+static char *
+escape_quotes(const char *inbuf)
+{
+	char *outbuf, *out_s;
+	const char *in_s;
+	unsigned outbuf_len = strlen(inbuf);
+
+	for (in_s = inbuf; *in_s != '\0'; in_s++) {
+		if (*in_s == '"' || *in_s == '\r' || *in_s == '\n')
+			outbuf_len++;
+	}
+	outbuf = safe_calloc(outbuf_len + 1, sizeof (*outbuf));
+	for (in_s = inbuf, out_s = outbuf; *in_s != '\0'; in_s++, out_s++) {
+		switch (*in_s) {
+		case '"':
+			*out_s = '\\';
+			out_s++;
+			*out_s = '"';
+			break;
+		case '\r':
+			*out_s = '\\';
+			out_s++;
+			*out_s = 'r';
+			break;
+		case '\n':
+			*out_s = '\\';
+			out_s++;
+			*out_s = 'n';
+			break;
+		default:
+			*out_s = *in_s;
+			break;
+		}
+	}
+	return (outbuf);
+}
+
+PRINTF_ATTR(1) static void
+report_error(const char *format, ...)
+{
+	char *buf1, *buf2;
+	unsigned l;
+
+	va_list ap;
+
+	va_start(ap, format);
+	buf1 = vsprintf_alloc(format, ap);
+	va_end(ap);
+	/* Strip trailing newline characters (if any) */
+	l = strlen(buf1);
+	if (l != 0 && buf1[l - 1] == '\n')
+		buf1[l - 1] = '\0';
+	/* Escape quote characters */
+	buf2 = escape_quotes(buf1);
+	free(buf1);
+	buf1 = NULL;
+	switch (output_format) {
+	case FORMAT_HUMAN_READABLE:
+		fprintf(stderr, "Error: %s\n", buf2);
+		free(buf2);
+		return;
+		/*
+		 * Machine-readable errors go into stddout, so that simple
+		 * output piping can see the errors.
+		 */
+	case FORMAT_CSV:
+		printf("ERROR,\"%s\"\n", buf2);
+		free(buf2);
+		return;
+	case FORMAT_JSON:
+		printf("{\n"
+		    "  \"RESULT\": \"ERROR\",\n"
+		    "  \"ERROR\": \"%s\"\n"
+		    "}\n", buf2);
+		free(buf2);
+		return;
+	}
+	VERIFY_FAIL();
+}
+
 static void
 debug_print(const char *str)
 {
-	fprintf(stderr, "%s",str);
+	report_error("%s", str);
 }
 
 static bool print_first_data_row = true;
@@ -222,7 +302,9 @@ print_table_header(const char *first, ...)
 	case FORMAT_CSV:
 		break;
 	case FORMAT_JSON:
-		printf("[");
+		printf("{\n"
+		    "  \"RESULT\": \"OK\",\n"
+		    "  \"OUTPUT\": [");
 		break;
 	}
 	print_first_data_row = true;
@@ -236,7 +318,8 @@ print_table_footer(void)
 	case FORMAT_CSV:
 		break;
 	case FORMAT_JSON:
-		printf("\n]\n");
+		printf("\n  ]\n"
+		    "}\n");
 		break;
 	}
 }
@@ -322,6 +405,7 @@ static void
 print_table_data_str(FILE *fp, const print_data_t *data)
 {
 	char format[32];
+	char *quoted;
 
 	ASSERT(fp != NULL);
 	ASSERT(data != NULL);
@@ -339,10 +423,14 @@ print_table_data_str(FILE *fp, const print_data_t *data)
 			fprintf(fp, "%s", data->units);
 		break;
 	case FORMAT_CSV:
-		fprintf(fp, "\"%s\"", data->str);
+		quoted = escape_quotes(data->str);
+		fprintf(fp, "\"%s\"", quoted);
+		free(quoted);
 		break;
 	case FORMAT_JSON:
-		fprintf(fp, "    \"%s\": \"%s\"", data->name, data->str);
+		quoted = escape_quotes(data->str);
+		fprintf(fp, "      \"%s\": \"%s\"", data->name, quoted);
+		free(quoted);
 		break;
 	}
 }
@@ -371,7 +459,7 @@ print_table_data_i32(FILE *fp, const print_data_t *data)
 		fprintf(fp, "%d", data->i32);
 		break;
 	case FORMAT_JSON:
-		fprintf(fp, "    \"%s\": %d", data->name, data->i32);
+		fprintf(fp, "      \"%s\": %d", data->name, data->i32);
 		break;
 	}
 }
@@ -398,7 +486,7 @@ print_table_data_bool(FILE *fp, const print_data_t *data)
 		fprintf(fp, "%d", data->b != false);
 		break;
 	case FORMAT_JSON:
-		fprintf(fp, "    \"%s\": %s", data->name, data->b != false ?
+		fprintf(fp, "      \"%s\": %s", data->name, data->b != false ?
 		    "true" : "false");
 		break;
 	}
@@ -430,7 +518,7 @@ print_table_data_f64(FILE *fp, const print_data_t *data)
 		fprintf(fp, "%f", data->f64);
 		break;
 	case FORMAT_JSON:
-		fprintf(fp, "    \"%s\": %f", data->name, data->f64);
+		fprintf(fp, "      \"%s\": %f", data->name, data->f64);
 		break;
 	}
 }
@@ -453,16 +541,20 @@ print_table_data_str_array(FILE *fp, const print_data_t *data)
 	case FORMAT_CSV:
 		fprintf(fp, "\"");
 		for (unsigned i = 0; i < data->str_array_len; i++) {
-			fprintf(fp, "%s%s", data->str_array[i],
+			char *quoted = escape_quotes(data->str_array[i]);
+			fprintf(fp, "%s%s", quoted,
 			    i + 1 < data->str_array_len ? "," : "");
+			free(quoted);
 		}
 		fprintf(fp, "\"");
 		break;
 	case FORMAT_JSON:
-		fprintf(fp, "    \"%s\": [", data->name);
+		fprintf(fp, "      \"%s\": [", data->name);
 		for (unsigned i = 0; i < data->str_array_len; i++) {
-			fprintf(fp, "\"%s\"%s", data->str_array[i],
+			char *quoted = escape_quotes(data->str_array[i]);
+			fprintf(fp, "\"%s\"%s", quoted,
 			    i + 1 < data->str_array_len ? ", " : "");
+			free(quoted);
 		}
 		fprintf(fp, "]");
 		break;
@@ -482,7 +574,7 @@ print_table_row(FILE *fp, ...)
 	case FORMAT_CSV:
 		break;
 	case FORMAT_JSON:
-		fprintf(fp, "%s\n  {", print_first_data_row ? "" : ",");
+		fprintf(fp, "%s\n    {", print_first_data_row ? "" : ",");
 		break;
 	}
 	print_first_data_row = false;
@@ -539,7 +631,7 @@ print_table_row(FILE *fp, ...)
 		fprintf(fp, "\n");
 		break;
 	case FORMAT_JSON:
-		fprintf(fp, "\n  }");
+		fprintf(fp, "\n    }");
 		break;
 	}
 }
@@ -622,8 +714,8 @@ bus_cmd(void)
 	}
 	comp = libelec_comp_find(sys, bus_name);
 	if (comp == NULL || libelec_comp2info(comp)->type != ELEC_BUS) {
-		fprintf(stderr, "Error: unknown component %s, or %s is not "
-		    "a bus\n", bus_name, bus_name);
+		report_error("unknown component %s, or %s is not a bus",
+		    bus_name, bus_name);
 		return;
 	}
 	if (!get_next_word(subcmd, sizeof (subcmd))) {
@@ -655,8 +747,7 @@ bus_cmd(void)
 		}
 		print_table_footer();
 	} else {
-		fprintf(stderr, "Error: unknown bus subcommand \"%s\"\n",
-		    subcmd);
+		report_error("unknown bus subcommand \"%s\"", subcmd);
 	}
 }
 
@@ -701,8 +792,8 @@ tru_cmd(void)
 	if (comp == NULL ||
 	    (libelec_comp2info(comp)->type != ELEC_TRU &&
 	    libelec_comp2info(comp)->type != ELEC_INV)) {
-		fprintf(stderr, "Error: unknown component %s, or %s is not a "
-		    "TRU/inverter\n", tru_name, tru_name);
+		report_error("unknown component %s, or %s is not a "
+		    "TRU/inverter", tru_name, tru_name);
 		return;
 	}
 	print_table_header("NAME", -30, "U_in", 6, "W_in", 6,
@@ -751,8 +842,8 @@ gen_cmd(void)
 	}
 	comp = libelec_comp_find(sys, gen_name);
 	if (comp == NULL || libelec_comp2info(comp)->type != ELEC_GEN) {
-		fprintf(stderr, "Error: unknown component %s, or %s is not a "
-		    "generator\n", gen_name, gen_name);
+		report_error("unknown component %s, or %s is not a generator",
+		    gen_name, gen_name);
 		return;
 	}
 	if (!get_next_word(subcmd, sizeof (subcmd))) {
@@ -768,14 +859,13 @@ gen_cmd(void)
 
 		if (!get_next_word(rpm_str, sizeof (rpm_str)) ||
 		    sscanf(rpm_str, "%lf", &rpm) != 1) {
-			fprintf(stderr, "Error: missing or malformed RPM "
-			    "argument to \"rpm\" subcommand\n");
+			report_error("missing or malformed RPM argument to "
+			    "\"rpm\" subcommand");
 			return;
 		}
 		libelec_gen_set_rpm(comp, rpm);
 	} else {
-		fprintf(stderr, "Error: unknown gen subcommand \"%s\"\n",
-		    subcmd);
+		report_error("unknown gen subcommand \"%s\"", subcmd);
 	}
 }
 
@@ -826,7 +916,7 @@ tie_cmd(void)
 	}
 	comp = libelec_comp_find(sys, tie_name);
 	if (comp == NULL) {
-		fprintf(stderr, "Error: unknown tie name %s\n", tie_name);
+		report_error("unknown tie name %s", tie_name);
 		return;
 	}
 	/*
@@ -843,7 +933,7 @@ tie_cmd(void)
 			goto out;
 		}
 		if (!check_comp_attachment(comp, bus)) {
-			fprintf(stderr, "Error: %s is not connected to %s\n",
+			report_error("%s is not connected to %s",
 			    tie_name, bus);
 			goto out;
 		}
@@ -904,7 +994,7 @@ cb_cmd(void)
 	}
 	comp = libelec_comp_find(sys, cb_name);
 	if (comp == NULL) {
-		fprintf(stderr, "Error: unknown CB %s\n", cb_name);
+		report_error("unknown CB %s", cb_name);
 		return;
 	}
 	if (!get_next_word(subcmd, sizeof (subcmd))) {
@@ -919,8 +1009,8 @@ cb_cmd(void)
 		bool set;
 
 		if (!get_next_word(set_str, sizeof (set_str))) {
-			fprintf(stderr, "Error: missing argument to \"set\" "
-			    "subcommand. Try typing \"help\".\n");
+			report_error("missing argument to \"set\" subcommand. "
+			    "Try typing \"help\".");
 			return;
 		}
 		if (tolower(set_str[0]) == 'y' || set_str[0] == '1') {
@@ -929,15 +1019,15 @@ cb_cmd(void)
 		    set_str[0] == '0') {
 			set = false;
 		} else {
-			fprintf(stderr, "Error: \"set\" subcommand argument "
+			report_error("\"set\" subcommand argument "
 			    "must be one of '0', 'N', '1' or 'Y'. "
-			    "Try typing \"help\".\n");
+			    "Try typing \"help\".");
 			return;
 		}
 		libelec_cb_set(comp, set);
 	} else {
-		fprintf(stderr, "Error: unknown cb subcommand \"%s\". "
-		    "Try typing \"help\".\n", subcmd);
+		report_error("unknown cb subcommand \"%s\". "
+		    "Try typing \"help\".", subcmd);
 	}
 }
 
@@ -979,8 +1069,8 @@ batt_cmd(void)
 	}
 	comp = libelec_comp_find(sys, batt_name);
 	if (comp == NULL || libelec_comp2info(comp)->type != ELEC_BATT) {
-		fprintf(stderr, "Error: unknown component %s, or %s is not a "
-		    "battery\n", batt_name, batt_name);
+		report_error("unknown component %s, or %s is not a battery",
+		    batt_name, batt_name);
 		return;
 	}
 	if (!get_next_word(subcmd, sizeof (subcmd))) {
@@ -994,14 +1084,14 @@ batt_cmd(void)
 		char chg_str[32];
 		float chg;
 		if (!get_next_word(chg_str, sizeof (chg_str))) {
-			fprintf(stderr, "Error: missing argument to \"chg\" "
-			    "subcommand. Try typing \"help\".\n");
+			report_error("missing argument to \"chg\" subcommand. "
+			    "Try typing \"help\".");
 			return;
 		}
 		if (sscanf(chg_str, "%f", &chg) != 1 || chg < 0 || chg > 100) {
-			fprintf(stderr, "Error: state of charge argument to "
-			    "\"chg\" subcommand must be a number 0-100, "
-			    "inclusive. Try typing \"help\".\n");
+			report_error("state of charge argument to \"chg\" "
+			    "subcommand must be a number 0-100, inclusive. "
+			    "Try typing \"help\".");
 			return;
 		}
 		libelec_batt_set_chg_rel(comp, clamp(chg / 100, 0, 1));
@@ -1009,21 +1099,21 @@ batt_cmd(void)
 		char temp_str[32];
 		float temp;
 		if (!get_next_word(temp_str, sizeof (temp_str))) {
-			fprintf(stderr, "Error: missing argument to \"temp\" "
-			    "subcommand. Try typing \"help\".\n");
+			report_error("missing argument to \"temp\" "
+			    "subcommand. Try typing \"help\".");
 			return;
 		}
 		if (sscanf(temp_str, "%f", &temp) != 1 ||
 		    temp < -90 || temp > 90) {
-			fprintf(stderr, "Error: temperature argument to "
-			    "\"temp\" subcommand must be a number "
-			    "-90..+90, inclusive. Try typing \"help\".\n");
+			report_error("temperature argument to \"temp\" "
+			    "subcommand must be a number -90..+90, inclusive. "
+			    "Try typing \"help\".");
 			return;
 		}
 		libelec_batt_set_temp(comp, C2KELVIN(temp));
 	} else {
-		fprintf(stderr, "Error: unknown batt subcommand \"%s\". "
-		    "Try typing \"help\".\n", subcmd);
+		report_error("unknown batt subcommand \"%s\". "
+		    "Try typing \"help\".", subcmd);
 	}
 }
 
@@ -1064,8 +1154,8 @@ load_cmd(void)
 	}
 	comp = libelec_comp_find(sys, name);
 	if (comp == NULL || libelec_comp2info(comp)->type != ELEC_LOAD) {
-		fprintf(stderr, "Error: unknown component %s, or %s is not a "
-		    "load\n", name, name);
+		report_error("unknown component %s, or %s is not a load",
+		    name, name);
 		return;
 	}
 	if (!get_next_word(subcmd, sizeof (subcmd))) {
@@ -1083,8 +1173,8 @@ load_cmd(void)
 
 		if (!get_next_word(load_str, sizeof (load_str)) ||
 		    sscanf(load_str, "%f", &load) != 1 || load < 0) {
-			fprintf(stderr, "Error: missing or malformed "
-			    "argument. Try typing \"help\".\n");
+			report_error("missing or malformed argument. "
+			    "Try typing \"help\".");
 			return;
 		}
 		srch.info = libelec_comp2info(comp);
@@ -1096,8 +1186,8 @@ load_cmd(void)
 		}
 		load_info->load = load;
 	} else {
-		fprintf(stderr, "Error: unknown load subcommand \"%s\". "
-		    "Try typing \"help\".\n", subcmd);
+		report_error("unknown load subcommand \"%s\". "
+		    "Try typing \"help\".", subcmd);
 	}
 }
 
@@ -1116,11 +1206,10 @@ draw_cmd(void)
 
 	if (!get_next_word(subcmd, sizeof (subcmd))) {
 		if (filename[0] == '\0') {
-			fprintf(stderr, "Error: missing filename argument. "
-			    "You must pass a filename at least once, before\n"
+			report_error("missing filename argument. "
+			    "You must pass a filename at least once, before "
 			    "invoking the \"draw\" command without arguments "
-			    "to redraw the same image.\n"
-			    "Try typing \"help\".\n");
+			    "to redraw the same image. Try typing \"help\".");
 			return;
 		}
 		lacf_strlcpy(subcmd, filename, sizeof (subcmd));
@@ -1132,9 +1221,8 @@ draw_cmd(void)
 		    !get_next_word(offset_str[1], sizeof (offset_str[1])) ||
 		    sscanf(offset_str[0], "%lf", &new_offset[0]) != 1 ||
 		    sscanf(offset_str[1], "%lf", &new_offset[1]) != 1) {
-			fprintf(stderr, "Error: missing offset arguments, "
-			    "or one of the offsets is invalid. "
-			    "Try typing \"help\".\n");
+			report_error("missing offset arguments, or one of "
+			    "the offsets is invalid. Try typing \"help\".");
 			return;
 		}
 		offset[0] = new_offset[0];
@@ -1147,8 +1235,8 @@ draw_cmd(void)
 		if (!get_next_word(scale_str, sizeof (scale_str)) ||
 		    sscanf(scale_str, "%lf", &new_scale) != 1 ||
 		    new_scale <= 0) {
-			fprintf(stderr, "Error: missing scale argument, or "
-			    "scale is invalid. Try typing \"help\".\n");
+			report_error("missing scale argument, or scale "
+			    "is invalid. Try typing \"help\".");
 			return;
 		}
 		pos_scale = new_scale;
@@ -1160,8 +1248,8 @@ draw_cmd(void)
 		if (!get_next_word(fontsz_str, sizeof (fontsz_str)) ||
 		    sscanf(fontsz_str, "%lf", &new_fontsz) != 1 ||
 		    new_fontsz <= 0) {
-			fprintf(stderr, "Error: missing fontsz argument, or "
-			    "fontsz is invalid. Try typing \"help\".\n");
+			report_error("missing fontsz argument, or fontsz "
+			    "is invalid. Try typing \"help\".");
 			return;
 		}
 		fontsz = new_fontsz;
@@ -1175,8 +1263,8 @@ draw_cmd(void)
 		    sscanf(imgsz_str[0], "%d", &new_imgsz[0]) != 1 ||
 		    sscanf(imgsz_str[1], "%d", &new_imgsz[1]) != 1 ||
 		    new_imgsz[0] <= 256 || new_imgsz[1] <= 256) {
-			fprintf(stderr, "Error: missing imgsz argument, or "
-			    "imgsz is invalid. Try typing \"help\".\n");
+			report_error("missing imgsz argument, or imgsz "
+			    "is invalid. Try typing \"help\".");
 			return;
 		}
 		imgsz[0] = new_imgsz[0];
@@ -1202,14 +1290,13 @@ draw_cmd(void)
 		const elec_comp_info_t *info;
 
 		if (comp == NULL) {
-			fprintf(stderr, "Error: component %s not found\n",
-			    comp_name);
+			report_error("component %s not found", comp_name);
 			goto errout;
 		}
 		info = libelec_comp2info(comp);
 		if (IS_NULL_VECT(info->gui.pos)) {
-			fprintf(stderr, "Error: component %s has no defined "
-			    "graphical position\n", comp_name);
+			report_error("component %s has no defined "
+			    "graphical position", comp_name);
 			goto errout;
 		}
 		libelec_draw_comp_info(comp, cr, pos_scale, fontsz,
@@ -1511,8 +1598,8 @@ print_help(const char *cmd)
 		    "    Quits nettest.\n");
 	}
 	if (cmd != NULL && !cmd_found) {
-		fprintf(stderr, "Error: unknown command \"%s\". "
-		    "Try typing \"help\".\n", cmd);
+		report_error("unknown command \"%s\". "
+		    "Try typing \"help\".", cmd);
 	}
 }
 
@@ -2061,12 +2148,11 @@ read_commands(FILE *fp, const char *filename, bool interactive)
 #endif	/* LIBELEC_SLOW_DEBUG */
 		} else {
 			if (interactive) {
-				fprintf(stderr, "Error: unknown command: "
-				    "\"%s\". Try typing \"help\".\n", cmd);
+				report_error("unknown command: "
+				    "\"%s\". Try typing \"help\".", cmd);
 			} else {
-				fprintf(stderr, "Error: %s:%d: Unknown "
-				    "command: \"%s\"\n", filename, linenum,
-				    cmd);
+				report_error("%s:%d: Unknown command: "
+				    "\"%s\"", filename, linenum, cmd);
 			}
 		}
 		free(cmdline);
@@ -2192,7 +2278,7 @@ main(int argc, char **argv)
 	if (init_filename != NULL) {
 		FILE *fp = fopen(init_filename, "r");
 		if (fp == NULL) {
-			fprintf(stderr, "Error: can't open %s: %s\n",
+			report_error("can't open %s: %s",
 			    init_filename, strerror(errno));
 			exit(EXIT_FAILURE);
 		}
