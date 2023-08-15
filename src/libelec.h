@@ -467,10 +467,15 @@ void libelec_remove_user_cb(elec_sys_t *sys, bool pre, elec_user_cb_t cb,
 
 /* Finding devices and interrogating their configuration */
 elec_comp_t *libelec_comp_find(elec_sys_t *sys, const char *name);
-void libelec_walk_comps(elec_sys_t *sys, void (*cb)(elec_comp_t *, void *),
-    void *userinfo);
+void libelec_walk_comps(const elec_sys_t *sys,
+    void (*cb)(elec_comp_t *, void *), void *userinfo);
 const elec_comp_info_t *libelec_comp2info(const elec_comp_t *comp);
+
 bool libelec_comp_is_AC(const elec_comp_t *comp);
+elec_comp_type_t libelec_comp_get_type(const elec_comp_t *comp);
+const char *libelec_comp_get_name(const elec_comp_t *comp);
+const char *libelec_comp_get_location(const elec_comp_t *comp);
+bool libelec_comp_get_autogen(const elec_comp_t *comp);
 
 size_t libelec_comp_get_num_conns(const elec_comp_t *comp);
 elec_comp_t *libelec_comp_get_conn(const elec_comp_t *comp, size_t i);

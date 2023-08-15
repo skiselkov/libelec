@@ -3,3 +3,5 @@ doc/html
 src/build
 nettest/nettest
 nettest/build
+rust/target
+rust/Cargo.lock

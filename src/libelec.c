@@ -2032,7 +2032,7 @@ libelec_remove_user_cb(elec_sys_t *sys, bool pre, elec_user_cb_t cb,
  *	above.
  */
 void
-libelec_walk_comps(elec_sys_t *sys, void (*cb)(elec_comp_t *, void*),
+libelec_walk_comps(const elec_sys_t *sys, void (*cb)(elec_comp_t *, void*),
     void *userinfo)
 {
 	ASSERT(sys != NULL);
@@ -2528,6 +2528,34 @@ libelec_comp_is_AC(const elec_comp_t *comp)
 		VERIFY_FAIL();
 	}
 	VERIFY_FAIL();
+}
+
+elec_comp_type_t
+libelec_comp_get_type(const elec_comp_t *comp)
+{
+	ASSERT(comp != NULL);
+	return (comp->info->type);
+}
+
+const char *
+libelec_comp_get_name(const elec_comp_t *comp)
+{
+	ASSERT(comp != NULL);
+	return (comp->info->name);
+}
+
+const char *
+libelec_comp_get_location(const elec_comp_t *comp)
+{
+	ASSERT(comp != NULL);
+	return (comp->info->location);
+}
+
+bool
+libelec_comp_get_autogen(const elec_comp_t *comp)
+{
+	ASSERT(comp != NULL);
+	return (comp->info->autogen);
 }
 
 /**
