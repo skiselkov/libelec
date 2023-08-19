@@ -119,7 +119,8 @@ pub struct ElecComp {
 }
 
 #[derive(Debug, PartialEq)]
-pub enum ElecCompType {
+#[repr(C)]
+pub enum CompType {
 	Batt,
 	Gen,
 	TRU,
@@ -145,26 +146,9 @@ impl ElecComp {
 			    .to_string()
 		}
 	}
-	fn libelec_comp_type2enum(t: u32) -> ElecCompType {
-		match t {
-		ELEC_BATT => ElecCompType::Batt,
-		ELEC_GEN => ElecCompType::Gen,
-		ELEC_TRU => ElecCompType::TRU,
-		ELEC_INV => ElecCompType::Inv,
-		ELEC_LOAD => ElecCompType::Load,
-		ELEC_BUS => ElecCompType::Bus,
-		ELEC_CB => ElecCompType::CB,
-		ELEC_SHUNT => ElecCompType::Shunt,
-		ELEC_TIE => ElecCompType::Tie,
-		ELEC_DIODE => ElecCompType::Diode,
-		ELEC_LABEL_BOX => ElecCompType::LabelBox,
-		_ => unreachable!()
-		}
-	}
-	fn get_type(&self) -> ElecCompType {
+	fn get_type(&self) -> CompType {
 		unsafe {
-			Self::libelec_comp_type2enum(libelec_comp_get_type(
-			    self.comp))
+			libelec_comp_get_type(self.comp)
 		}
 	}
 	pub fn get_location(&self) -> String {
@@ -264,22 +248,22 @@ impl ElecComp {
 	 * CBs
 	 */
 	pub fn cb_set(&mut self, set: bool) {
-		assert_eq!(self.get_type(), ElecCompType::CB);
+		assert_eq!(self.get_type(), CompType::CB);
 		unsafe { libelec_cb_set(self.comp, set) }
 	}
 	pub fn cb_get(&self) -> bool {
-		assert_eq!(self.get_type(), ElecCompType::CB);
+		assert_eq!(self.get_type(), CompType::CB);
 		unsafe { libelec_cb_get(self.comp) }
 	}
 	pub fn cb_get_temp(&self) -> f64 {
-		assert_eq!(self.get_type(), ElecCompType::CB);
+		assert_eq!(self.get_type(), CompType::CB);
 		unsafe { libelec_cb_get_temp(self.comp) }
 	}
 	/*
 	 * Ties
 	 */
 	pub fn tie_set_list(&mut self, list: &Vec<ElecComp>) {
-		assert_eq!(self.get_type(), ElecCompType::Tie);
+		assert_eq!(self.get_type(), CompType::Tie);
 		let comps: Vec<*const elec_comp_t> = list.iter()
 		    .map(|c| c.comp as *const elec_comp_t)
 		    .collect();
@@ -289,15 +273,15 @@ impl ElecComp {
 		}
 	}
 	pub fn tie_set_all(&mut self, tied: bool) {
-		assert_eq!(self.get_type(), ElecCompType::Tie);
+		assert_eq!(self.get_type(), CompType::Tie);
 		unsafe { libelec_tie_set_all(self.comp, tied) }
 	}
 	pub fn tie_get_all(&self) -> bool {
-		assert_eq!(self.get_type(), ElecCompType::Tie);
+		assert_eq!(self.get_type(), CompType::Tie);
 		unsafe { libelec_tie_get_all(self.comp) }
 	}
 	pub fn tie_get_list(&self) -> Vec<ElecComp> {
-		assert_eq!(self.get_type(), ElecCompType::Tie);
+		assert_eq!(self.get_type(), CompType::Tie);
 		let n_comps = unsafe { libelec_tie_get_num_buses(self.comp) };
 		let mut comps: Vec<*mut elec_comp_t> =
 		    vec![std::ptr::null_mut(); n_comps];
@@ -310,34 +294,34 @@ impl ElecComp {
 		    .collect()
 	}
 	pub fn tie_get_num_buses(&self) -> usize {
-		assert_eq!(self.get_type(), ElecCompType::Tie);
+		assert_eq!(self.get_type(), CompType::Tie);
 		unsafe { libelec_tie_get_num_buses(self.comp) }
 	}
 	/*
 	 * Batteries
 	 */
 	pub fn batt_get_chg_rel(&self) -> f64 {
-		assert_eq!(self.get_type(), ElecCompType::Batt);
+		assert_eq!(self.get_type(), CompType::Batt);
 		unsafe { libelec_batt_get_chg_rel(self.comp) }
 	}
 	pub fn batt_set_chg_rel(&mut self, chg_rel: f64) {
-		assert_eq!(self.get_type(), ElecCompType::Batt);
+		assert_eq!(self.get_type(), CompType::Batt);
 		unsafe { libelec_batt_set_chg_rel(self.comp, chg_rel) }
 	}
 	pub fn batt_get_temp(&self) -> f64 {
-		assert_eq!(self.get_type(), ElecCompType::Batt);
+		assert_eq!(self.get_type(), CompType::Batt);
 		unsafe { libelec_batt_get_temp(self.comp) }
 	}
 	#[allow(non_snake_case)]
 	pub fn batt_set_temp(&mut self, T: f64) {
-		assert_eq!(self.get_type(), ElecCompType::Batt);
+		assert_eq!(self.get_type(), CompType::Batt);
 		unsafe { libelec_batt_set_temp(self.comp, T) }
 	}
 	/*
 	 * Chargers
 	 */
 	pub fn chgr_get_working(&self) -> bool {
-		assert_eq!(self.get_type(), ElecCompType::TRU);
+		assert_eq!(self.get_type(), CompType::TRU);
 		unsafe { libelec_chgr_get_working(self.comp) }
 	}
 }
@@ -363,18 +347,6 @@ pub struct elec_t {
 pub struct elec_comp_t {
 	_unused: [u8; 0],
 }
-
-const ELEC_BATT: u32 =		0;
-const ELEC_GEN: u32 =		1;
-const ELEC_TRU: u32 =		2;
-const ELEC_INV: u32 =		3;
-const ELEC_LOAD: u32 =		4;
-const ELEC_BUS: u32 =		5;
-const ELEC_CB: u32 =		6;
-const ELEC_SHUNT: u32 =		7;
-const ELEC_TIE: u32 =		8;
-const ELEC_DIODE: u32 =		9;
-const ELEC_LABEL_BOX: u32 =	10;
 
 const ELEC_MAX_SRCS: usize =	64;
 
@@ -406,7 +378,7 @@ extern "C" {
 
 	fn libelec_comp_is_AC(comp: *const elec_comp_t) -> bool;
 	fn libelec_comp_get_name(comp: *const elec_comp_t) -> *const c_char;
-	fn libelec_comp_get_type(comp: *const elec_comp_t) -> u32;
+	fn libelec_comp_get_type(comp: *const elec_comp_t) -> CompType;
 	fn libelec_comp_get_location(comp: *const elec_comp_t) -> *const c_char;
 	fn libelec_comp_get_autogen(comp: *const elec_comp_t) -> bool;
 
