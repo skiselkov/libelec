@@ -22,21 +22,23 @@ pub struct ElecSys {
 }
 
 impl ElecSys {
-	pub fn new(filename: &str) -> Option<ElecSys> {
+	pub fn new(filename: &str) -> Result<ElecSys, ()> {
 		let elec = unsafe {
 			let c_filename = CString::new(filename)
 			    .expect("`filename` contains a NUL byte");
 			libelec_new(c_filename.as_ptr())
 		};
 		if !elec.is_null() {
-			Some(ElecSys{elec: elec})
+			Ok(ElecSys{elec: elec})
 		} else {
-			None
+			Err(())
 		}
 	}
-	pub fn start(&mut self) -> bool {
-		unsafe {
-			libelec_sys_start(self.elec)
+	pub fn start(&mut self) -> Result<(), ()> {
+		if unsafe { libelec_sys_start(self.elec) } {
+			Ok(())
+		} else {
+			Err(())
 		}
 	}
 	pub fn stop(&mut self) {
