@@ -15,6 +15,8 @@ use std::os::raw::c_void;
 use std::ffi::CString;
 use std::ffi::CStr;
 
+use acfutils::conf::conf_t;
+
 pub struct ElecSys {
 	elec: *mut elec_t
 }
@@ -22,7 +24,8 @@ pub struct ElecSys {
 impl ElecSys {
 	pub fn new(filename: &str) -> Option<ElecSys> {
 		let elec = unsafe {
-			let c_filename = CString::new(filename).unwrap();
+			let c_filename = CString::new(filename)
+			    .expect("`filename` contains a NUL byte");
 			libelec_new(c_filename.as_ptr())
 		};
 		if !elec.is_null() {
@@ -39,6 +42,28 @@ impl ElecSys {
 	pub fn stop(&mut self) {
 		unsafe {
 			libelec_sys_stop(self.elec)
+		}
+	}
+	pub fn serialize(&self, conf: &mut acfutils::conf::Conf, prefix: &str) {
+		unsafe {
+			let c_prefix = CString::new(prefix)
+			    .expect("`prefix` contains a NUL byte");
+			libelec_serialize(self.elec, conf.to_raw_conf_t(),
+			    c_prefix.as_ptr());
+		}
+	}
+	#[must_use]
+	pub fn deserialize(&mut self, conf: &acfutils::conf::Conf,
+	    prefix: &str) -> Result<(), ()> {
+		unsafe {
+			let c_prefix = CString::new(prefix)
+			    .expect("`prefix` contains a NUL byte");
+			if libelec_deserialize(self.elec, conf.to_raw_conf_t(),
+			    c_prefix.as_ptr()) {
+				Ok(())
+			} else {
+				Err(())
+			}
 		}
 	}
 	pub fn is_started(&self) -> bool {
@@ -75,7 +100,8 @@ impl ElecSys {
 	}
 	pub fn comp_find(&self, name: &str) -> Option<ElecComp> {
 		let comp = unsafe {
-			let c_name = CString::new(name).unwrap();
+			let c_name = CString::new(name)
+			    .expect("`name` contains a NUL byte");
 			libelec_comp_find(self.elec, c_name.as_ptr())
 		};
 		if !comp.is_null() {
@@ -142,7 +168,7 @@ impl ElecComp {
 		unsafe {
 			CStr::from_ptr(libelec_comp_get_name(self.comp))
 			    .to_str()
-			    .unwrap()
+			    .expect("Component name not valid UTF-8?!")
 			    .to_string()
 		}
 	}
@@ -155,7 +181,7 @@ impl ElecComp {
 		unsafe {
 			CStr::from_ptr(libelec_comp_get_location(self.comp))
 			    .to_str()
-			    .unwrap()
+			    .expect("Component name not valid UTF-8?!")
 			    .to_string()
 		}
 	}
@@ -446,6 +472,11 @@ extern "C" {
 
 	pub fn libelec_phys_get_batt_voltage(U_nominal: f64, chg_rel: f64,
 	    I_rel: f64) -> f64;
+
+	fn libelec_serialize(sys: *const elec_t, ser: *mut conf_t,
+	    prefix: *const c_char);
+	fn libelec_deserialize(sys: *mut elec_t, ser: *const conf_t,
+	    prefix: *const c_char) -> bool;
 }
 
 mod tests {
@@ -467,7 +498,11 @@ mod tests {
 		let mut sys = ElecSys::new(TEST_NET_FILE)
 		    .expect(&format!("Failed to load net {}", TEST_NET_FILE));
 		sys.start();
-		std::thread::sleep(std::time::Duration::new(1, 0));
+		/*
+		 * let the network run for at least a few loops, so the
+		 * system state has time to stabilize
+		 */
+		std::thread::sleep(std::time::Duration::from_secs_f64(0.25));
 		for comp in sys.all_comps().iter() {
 			if !comp.get_autogen() {
 				println!(concat!(
@@ -500,5 +535,26 @@ mod tests {
 				    comp.in_pwr(), comp.out_pwr());
 			}
 		}
+	}
+	#[test]
+	fn serialize_deserialize() {
+		use crate::ElecSys;
+		use acfutils::conf::Conf;
+		let mut conf = Conf::new();
+
+		unsafe { crc64_init() };
+		let mut sys = ElecSys::new(TEST_NET_FILE)
+		    .expect(&format!("Failed to load net {}", TEST_NET_FILE));
+		sys.start();
+		/*
+		 * let the network run for at least a few loops, so that
+		 * when we attempt to serialize, we need to interact with
+		 * the worker thread
+		 */
+		std::thread::sleep(std::time::Duration::from_secs_f64(0.25));
+		sys.serialize(&mut conf, "libelec");
+		sys.deserialize(&conf, "libelec")
+		    .expect("Cannot deserialize our own network?!");
+		sys.stop();
 	}
 }
