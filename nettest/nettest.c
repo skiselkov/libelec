@@ -232,9 +232,14 @@ report_error(const char *format, ...)
 	if (l != 0 && buf1[l - 1] == '\n')
 		buf1[l - 1] = '\0';
 	/* Escape quote characters */
-	buf2 = escape_quotes(buf1);
-	free(buf1);
-	buf1 = NULL;
+	if (output_format != FORMAT_HUMAN_READABLE) {
+		buf2 = escape_quotes(buf1);
+		free(buf1);
+		buf1 = NULL;
+	} else {
+		buf2 = buf1;
+		buf1 = NULL;
+	}
 	switch (output_format) {
 	case FORMAT_HUMAN_READABLE:
 		fprintf(stderr, "Error: %s\n", buf2);
@@ -665,6 +670,8 @@ elec_comp_type2str(elec_comp_type_t type)
 		return ("TRU");
 	case ELEC_INV:
 		return ("INV");
+	case ELEC_XFRMR:
+		return ("XFRMR");
 	case ELEC_LOAD:
 		return ("LOAD");
 	case ELEC_BUS:
@@ -752,18 +759,13 @@ bus_cmd(void)
 }
 
 static void
-print_trus_i(elec_comp_t *comp, void *userinfo)
+print_trus_xfrms_common(elec_comp_t *comp)
 {
-	const char *name = (userinfo != NULL ? userinfo : NULL);
 	const elec_comp_info_t *info;
 
 	ASSERT(comp != NULL);
 	info = libelec_comp2info(comp);
 
-	if ((info->type != ELEC_TRU && info->type != ELEC_INV) ||
-	    (name != NULL && strcmp(info->name, name) != 0)) {
-		return;
-	}
 	print_table_row(stdout,
 	    PRINT_STR("NAME", -30, info->name),
 	    PRINT_VOLTS("U_in", libelec_comp_get_in_volts(comp)),
@@ -776,29 +778,71 @@ print_trus_i(elec_comp_t *comp, void *userinfo)
 }
 
 static void
-tru_cmd(void)
+print_trus_i(elec_comp_t *comp, void *userinfo)
 {
-	char tru_name[128];
+	const char *name = (userinfo != NULL ? userinfo : NULL);
+	const elec_comp_info_t *info;
+
+	ASSERT(comp != NULL);
+	info = libelec_comp2info(comp);
+
+	if ((info->type != ELEC_TRU && info->type != ELEC_INV) ||
+	    (name != NULL && strcmp(info->name, name) != 0)) {
+		return;
+	}
+	print_trus_xfrms_common(comp);
+}
+
+static void
+print_xfrmrs_i(elec_comp_t *comp, void *userinfo)
+{
+	const char *name = (userinfo != NULL ? userinfo : NULL);
+	const elec_comp_info_t *info;
+
+	ASSERT(comp != NULL);
+	info = libelec_comp2info(comp);
+
+	if (info->type != ELEC_XFRMR ||
+	    (name != NULL && strcmp(info->name, name) != 0)) {
+		return;
+	}
+	print_trus_xfrms_common(comp);
+}
+
+static void
+tru_xfrmr_cmd(bool is_tru)
+{
+	char name[128];
 	elec_comp_t *comp;
 
-	if (!get_next_word(tru_name, sizeof (tru_name))) {
+	if (!get_next_word(name, sizeof (name))) {
 		print_table_header("NAME", -30, "U_in", 6, "W_in", 6,
 		    "Eff", 6, "U_out", 6, "I_out", 6, "W_out", 6, NULL);
-		libelec_walk_comps(sys, print_trus_i, NULL);
+		if (is_tru) {
+			libelec_walk_comps(sys, print_trus_i, NULL);
+		} else {
+			libelec_walk_comps(sys, print_xfrmrs_i, NULL);
+		}
 		print_table_footer();
 		return;
 	}
-	comp = libelec_comp_find(sys, tru_name);
-	if (comp == NULL ||
-	    (libelec_comp2info(comp)->type != ELEC_TRU &&
+	comp = libelec_comp_find(sys, name);
+	if (comp == NULL) {
+		report_error("unknown component %s", name);
+		return;
+	}
+	if (is_tru && (libelec_comp2info(comp)->type != ELEC_TRU &&
 	    libelec_comp2info(comp)->type != ELEC_INV)) {
-		report_error("unknown component %s, or %s is not a "
-		    "TRU/inverter", tru_name, tru_name);
+		report_error("%s is not a TRU/inverter", name);
+		return;
+	}
+	if (!is_tru && libelec_comp2info(comp)->type != ELEC_XFRMR) {
+		report_error("%s is not a transformer", name);
 		return;
 	}
 	print_table_header("NAME", -30, "U_in", 6, "W_in", 6,
 	    "Eff", 6, "U_out", 6, "I_out", 6, "W_out", 6, NULL);
-	libelec_walk_comps(sys, print_trus_i, tru_name);
+	libelec_walk_comps(sys, is_tru ? print_trus_i : print_xfrmrs_i, name);
 	print_table_footer();
 }
 
@@ -1433,6 +1477,27 @@ print_help(const char *cmd)
 		    "	W_out - output power out of the TRU/inverter in "
 		    "Watts\n");
 	}
+	if (cmd == NULL || lacf_strcasecmp(cmd, "xfrmr") == 0) {
+		cmd_found = true;
+		printf(
+		    "xfrmr XFRMR_NAME\n"
+		    "    Prints all transfoemrs on the network. If you "
+		    "provide an optional\n"
+		    "    transformer name, only the data for the listed "
+		    "transfomer will be\n"
+		    "    printed. Table columns:\n"
+		    "	U_in - input voltage into the TRU/inverter in Volts\n"
+		    "	W_in - input power draw into the TRU/inverter in "
+		    "Watts\n"
+		    "	Eff - TRU/inverter power conversion efficiency in "
+		    "percent\n"
+		    "	U_out - output voltage out of the TRU/inverter in "
+		    "Volts\n"
+		    "	I_out - output current out of the TRU/inverter in "
+		    "Amps\n"
+		    "	W_out - output power out of the TRU/inverter in "
+		    "Watts\n");
+	}
 	if (cmd == NULL) {
 		printf("\n"
 		    "===============\n"
@@ -1685,6 +1750,16 @@ static const cmd_part_t *cmd_parts_top[] = {
     },
     &(cmd_part_t){
 	.type = CMD_PART_KEYWORD,
+	.keyword = "xfrmr",
+	.subparts = {
+	    &(cmd_part_t){
+		.type = CMD_PART_COMP_NAME,
+		.comp_type_mask = 1 << ELEC_XFRMR,
+	    }
+	}
+    },
+    &(cmd_part_t){
+	.type = CMD_PART_KEYWORD,
 	.keyword = "load",
 	.subparts = {
 	    &(cmd_part_t){
@@ -1840,6 +1915,10 @@ static const cmd_part_t *cmd_parts_top[] = {
 	    &(cmd_part_t){
 		.type = CMD_PART_KEYWORD,
 		.keyword = "tru"
+	    },
+	    &(cmd_part_t){
+		.type = CMD_PART_KEYWORD,
+		.keyword = "xfrmr"
 	    },
 	    &(cmd_part_t){
 		.type = CMD_PART_KEYWORD,
@@ -2125,7 +2204,9 @@ read_commands(FILE *fp, const char *filename, bool interactive)
 		} else if (lacf_strcasecmp(cmd, "gen") == 0) {
 			gen_cmd();
 		} else if (lacf_strcasecmp(cmd, "tru") == 0) {
-			tru_cmd();
+			tru_xfrmr_cmd(true);
+		} else if (lacf_strcasecmp(cmd, "xfrmr") == 0) {
+			tru_xfrmr_cmd(false);
 		} else if (lacf_strcasecmp(cmd, "load") == 0) {
 			load_cmd();
 		} else if (lacf_strcasecmp(cmd, "tie") == 0) {

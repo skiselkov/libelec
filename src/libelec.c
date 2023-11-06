@@ -190,6 +190,8 @@ src_is_AC(const elec_comp_info_t *info)
 		return (info->gen.freq != 0);
 	case ELEC_INV:
 		return (true);
+	case ELEC_XFRMR:
+		return (true);
 	default:
 		VERIFY_FAIL();
 	}
@@ -381,7 +383,24 @@ resolve_bus_links(elec_sys_t *sys, elec_comp_t *bus)
 			} else {
 				ASSERT3P(comp->info->tru.ac, ==, bus->info);
 				CHECK_COMP_V(bus->info->bus.ac, "output of "
-				    "the the inverter must connect to an "
+				    "the inverter must connect to an AC bus, "
+				    "but %s is DC", bus->info->name);
+				comp->links[1].comp = bus;
+			}
+			break;
+		case ELEC_XFRMR:
+			ASSERT3U(comp->n_links, ==, 2);
+			ASSERT(comp->links != NULL);
+			if (comp->info->xfrmr.input == bus->info) {
+				CHECK_COMP_V(bus->info->bus.ac, "input to "
+				    "the transformer must connect to an AC "
+				    "bus, but %s is DC", bus->info->name);
+				comp->links[0].comp = bus;
+			} else {
+				ASSERT3P(comp->info->xfrmr.output, ==,
+				    bus->info);
+				CHECK_COMP_V(bus->info->bus.ac, "output of "
+				    "the transformer must connect to an "
 				    "AC bus, but %s is DC", bus->info->name);
 				comp->links[1].comp = bus;
 			}
@@ -583,6 +602,10 @@ comp_alloc(elec_sys_t *sys, elec_comp_info_t *info, unsigned *src_i)
 		comp->src_idx = *src_i;
 		(*src_i)++;
 		break;
+	case ELEC_XFRMR:
+		comp->src_idx = *src_i;
+		(*src_i)++;
+		break;
 	case ELEC_BUS:
 		break;
 	case ELEC_CB:
@@ -609,6 +632,7 @@ comp_alloc(elec_sys_t *sys, elec_comp_info_t *info, unsigned *src_i)
 		break;
 	case ELEC_TRU:
 	case ELEC_INV:
+	case ELEC_XFRMR:
 	case ELEC_CB:
 	case ELEC_SHUNT:
 	case ELEC_DIODE:
@@ -855,6 +879,16 @@ validate_elec_comp_infos_parse(const elec_comp_info_t *infos, size_t n_infos,
 			    "AC side not connected");
 			CHECK_COMP(info->tru.dc != NULL,
 			    "DC side not connected");
+			break;
+		case ELEC_XFRMR:
+			CHECK_COMP(info->xfrmr.in_volts > 0,
+			    "missing required \"IN_VOLTS\" parameter");
+			CHECK_COMP(info->xfrmr.out_volts > 0,
+			    "missing required \"OUT_VOLTS\" parameter");
+			CHECK_COMP(info->xfrmr.input != NULL,
+			    "input side not connected");
+			CHECK_COMP(info->xfrmr.output != NULL,
+			    "output side not connected");
 			break;
 		case ELEC_LOAD:
 			/*
@@ -1366,6 +1400,8 @@ comp_type2str(elec_comp_type_t type)
 		return ("TRU");
 	case ELEC_INV:
 		return ("INV");
+	case ELEC_XFRMR:
+		return ("XFRMR");
 	case ELEC_LOAD:
 		return ("LOAD");
 	case ELEC_BUS:
@@ -1396,12 +1432,29 @@ add_info_link(elec_comp_info_t *info, elec_comp_info_t *info2,
 			if (info->tru.ac != NULL)
 				return (false);
 			info->tru.ac = info2;
-		} else {
-			if (strcmp(slot_qual, "DC") != 0)
-				return (false);
+		} else if (strcmp(slot_qual, "DC") == 0) {
 			if (info->tru.dc != NULL)
 				return (false);
 			info->tru.dc = info2;
+		} else {
+			return (false);
+		}
+		break;
+	case ELEC_XFRMR:
+		if (slot_qual == NULL)
+			return (false);
+		if (strcmp(slot_qual, "IN") == 0) {
+			if (info->xfrmr.input != NULL) {
+				return (false);
+			}
+			info->xfrmr.input = info2;
+		} else if (strcmp(slot_qual, "OUT") == 0) {
+			if (info->xfrmr.output != NULL) {
+				return (false);
+			}
+			info->xfrmr.output = info2;
+		} else {
+			return (false);
 		}
 		break;
 	case ELEC_BUS:
@@ -1481,6 +1534,7 @@ infos_parse(const char *filename, size_t *num_infos)
 		    strncmp(line, "GEN ", 4) == 0 ||
 		    strncmp(line, "TRU ", 4) == 0 ||
 		    strncmp(line, "INV ", 4) == 0 ||
+		    strncmp(line, "XFRMR ", 4) == 0 ||
 		    strncmp(line, "LOAD ", 5) == 0 ||
 		    strncmp(line, "BUS ", 4) == 0 ||
 		    strncmp(line, "CB ", 3) == 0 ||
@@ -1581,6 +1635,14 @@ infos_parse(const char *filename, size_t *num_infos)
 			info->type = ELEC_INV;
 			info->name = safe_strdup(comps[1]);
 			info->int_R = 1;
+		} else if (strcmp(cmd, "XFRMR") == 0 && n_comps == 2) {
+			ASSERT3U(comp_i, <, num_comps);
+			CHECK_DUP_NAME(comps[1]);
+			info = &infos[comp_i++];
+			info->parse_linenum = linenum;
+			info->type = ELEC_XFRMR;
+			info->name = safe_strdup(comps[1]);
+			info->int_R = 1;
 		} else if (strcmp(cmd, "LOAD") == 0 &&
 		    (n_comps == 2 || n_comps == 3)) {
 			ASSERT3U(comp_i, <, num_comps);
@@ -1675,10 +1737,16 @@ infos_parse(const char *filename, size_t *num_infos)
 		    info != NULL && (info->type == ELEC_TRU ||
 		    info->type == ELEC_INV)) {
 			info->tru.in_volts = atof(comps[1]);
+		} else if (strcmp(cmd, "IN_VOLTS") == 0 && n_comps == 2 &&
+		    info != NULL && info->type == ELEC_XFRMR) {
+			info->xfrmr.in_volts = atof(comps[1]);
 		} else if (strcmp(cmd, "OUT_VOLTS") == 0 && n_comps == 2 &&
 		    info != NULL && (info->type == ELEC_TRU ||
 		    info->type == ELEC_INV)) {
 			info->tru.out_volts = atof(comps[1]);
+		} else if (strcmp(cmd, "OUT_VOLTS") == 0 && n_comps == 2 &&
+		    info != NULL && info->type == ELEC_XFRMR) {
+			info->xfrmr.out_volts = atof(comps[1]);
 		} else if (strcmp(cmd, "MIN_VOLTS") == 0 && n_comps == 2 &&
 		    info != NULL && info->type == ELEC_LOAD) {
 			info->load.min_volts = atof(comps[1]);
@@ -1759,6 +1827,9 @@ infos_parse(const char *filename, size_t *num_infos)
 			case ELEC_TRU:
 			case ELEC_INV:
 				curve_pp = &info->tru.eff_curve;
+				break;
+			case ELEC_XFRMR:
+				curve_pp = &info->xfrmr.eff_curve;
 				break;
 			default:
 				INVALID_LINE_FOR_COMP_TYPE;
@@ -1901,7 +1972,7 @@ infos_parse(const char *filename, size_t *num_infos)
 		} else if (strcmp(cmd, "INT_R") == 0 && n_comps == 2 &&
 		    info != NULL && (info->type == ELEC_BATT ||
 		    info->type == ELEC_GEN || info->type == ELEC_TRU ||
-		    info->type == ELEC_INV)) {
+		    info->type == ELEC_INV || info->type == ELEC_XFRMR)) {
 			info->int_R = atof(comps[1]);
 			CHECK_COMP(info->int_R > 0,
 			    "internal resistance must be positive");
@@ -1951,6 +2022,8 @@ infos_free(elec_comp_info_t *infos, size_t num_infos)
 			free(info->gen.eff_curve);
 		else if (info->type == ELEC_TRU || info->type == ELEC_INV)
 			free(info->tru.eff_curve);
+		else if (info->type == ELEC_XFRMR)
+			free(info->xfrmr.eff_curve);
 		else if (info->type == ELEC_BUS)
 			ZERO_FREE_N(info->bus.comps, info->bus.n_comps);
 	}
@@ -2101,6 +2174,7 @@ libelec_comp_get_num_conns(const elec_comp_t *comp)
 		return (comp->n_links);
 	case ELEC_TRU:
 	case ELEC_INV:
+	case ELEC_XFRMR:
 	case ELEC_CB:
 	case ELEC_SHUNT:
 	case ELEC_DIODE:
@@ -2133,6 +2207,7 @@ libelec_comp_get_conn(const elec_comp_t *comp, size_t i)
  *	- \ref ELEC_BATT : the charging voltage (if any)
  *	- \ref ELEC_TRU : the input voltage on the AC side of the TRU
  *	- \ref ELEC_INV : the input voltage on the DC side of the inverter
+ *	- \ref ELEC_XFRMR : the input voltage to the transformer
  *	- \ref ELEC_LOAD : the input voltage into the power supply of the
  *		load. This will immediately follow the bus voltage
  *		to which the load is attached. Please note that simply
@@ -2177,6 +2252,7 @@ libelec_comp_get_in_volts(const elec_comp_t *comp)
  *		extract energy out of the battery.
  *	- \ref ELEC_TRU : the output voltage on the DC side of the TRU
  *	- \ref ELEC_INV : the output voltage on the AC side of the inverter
+ *	- \ref ELEC_XFRMR : the output voltage of the transformer
  *	- \ref ELEC_LOAD : the output voltage out of the power supply of
  *		the load. If the load's power supply has no input
  *		capacitance, this will immediately follow the input
@@ -2218,6 +2294,7 @@ libelec_comp_get_out_volts(const elec_comp_t *comp)
  *	- \ref ELEC_BATT : the charging current (if any)
  *	- \ref ELEC_TRU : the input current on the AC side of the TRU
  *	- \ref ELEC_INV : the input current on the DC side of the inverter
+ *	- \ref ELEC_XFRMR : the input current to the transformer
  *	- \ref ELEC_LOAD : the input current into the power supply of the
  *		load. If the load has no input capacitance in its power
  *		supply, this will always be equal to the actual current
@@ -2264,6 +2341,7 @@ libelec_comp_get_in_amps(const elec_comp_t *comp)
  *	- \ref ELEC_BATT : the discharging current (if any)
  *	- \ref ELEC_TRU : the output current on the DC side of the TRU
  *	- \ref ELEC_INV : the output current on the AC side of the inverter
+ *	- \ref ELEC_XFRMR : the output current out of the transformer
  *	- \ref ELEC_LOAD : the output current out of the power supply of the
  *		load into its internal working components.
  *	- \ref ELEC_GEN : output current demand on the generator. This is
@@ -2304,13 +2382,16 @@ libelec_comp_get_out_amps(const elec_comp_t *comp)
  *	type:
  *	- \ref ELEC_BATT : the charging power flow (if any)
  *	- \ref ELEC_TRU : the input power on the AC side of the TRU. This
- *		will be higher than the output power on the DC side,
- *		because the efficiency losses during rectification
+ *		will be higher than the output power on the DC side
+ *		because of the efficiency losses during rectification
  *		and voltage transformation inside of the TRU.
  *	- \ref ELEC_INV : the input power on the DC side of the inverter.
- *		This will be higher than the output power on the AC side,
- *		because the efficiency losses during inversion and
+ *		This will be higher than the output power on the AC side
+ *		because of the efficiency losses during inversion and
  *		voltage transformation inside of the inverter.
+ *	- \ref ELEC_XFRMR : the input power into the transformer. This
+ *		will be higher than the output power because of the
+ *		efficiency losses during voltage transformation.
  *	- \ref ELEC_LOAD : the input power into the power supply of the load.
  *	- \ref ELEC_GEN : the mechanical load which the generator causes on
  *		its input shaft. You can use this to account for
@@ -2355,14 +2436,17 @@ libelec_comp_get_in_pwr(const elec_comp_t *comp)
  *		reducing the battery's state of charge (using
  *		libelec_batt_set_chg_rel()) over time, according to your
  *		battery's behavioral characteristics.
- *	- \ref ELEC_TRU : the output power on the DC side of the TRU. This
- *		will be lower than the input power on the AC side,
- *		because the efficiency losses during rectification
+ *	- \ref ELEC_TRU : the output power on the DC side of the TRU.
+ *		This will be lower than the input power on the AC side
+ *		because of the efficiency losses during rectification
  *		and voltage transformation inside of the TRU.
  *	- \ref ELEC_INV : the output power on the AC side of the inverter.
- *		This will be lower than the input power on the DC side,
- *		because the efficiency losses during inversion and
+ *		This will be lower than the input power on the DC side
+ *		because of the efficiency losses during inversion and
  *		voltage transformation inside of the inverter.
+ *	- \ref ELEC_XFRMR : the output power out of the transformer. This
+ *		will be lower than the input power because of efficiency
+ *		losses during voltage transformation.
  *	- \ref ELEC_LOAD : the output power out of the load's power supply
  *		and into the load's internal electronics. If you see this
  *		drop to zero, you can be sure that the load is no longer
@@ -2404,6 +2488,9 @@ libelec_comp_get_out_pwr(const elec_comp_t *comp)
  *		so this will always be zero.
  *	- \ref ELEC_TRU : the AC frequency on the AC side input of the TRU.
  *	- \ref ELEC_INV : always zero, since the inverter input is DC.
+ *	- \ref ELEC_XFRMR : the frequency of the AC current flowing through
+ *		the transformer. Both input and output frequency will always
+ *		be equal to each other.
  *	- \ref ELEC_LOAD : the AC frequency of the input bus into the load's
  *		power supply. If the load is DC, this will always be zero.
  *	- \ref ELEC_GEN : always equal to the output frequency (see
@@ -2437,6 +2524,9 @@ libelec_comp_get_in_freq(const elec_comp_t *comp)
  *	- \ref ELEC_TRU : always zero, since the TRU performs AC-to-DC
  *		rectification.
  *	- \ref ELEC_INV : the AC frequency generated by the inverter.
+ *	- \ref ELEC_XFRMR : the frequency of the AC current flowing through
+ *		the transformer. Both input and output frequency will always
+ *		be equal to each other.
  *	- \ref ELEC_LOAD : the AC frequency of the input bus into the load's
  *		power supply. If the load is DC, this will always be zero.
  *		If the load is unpowered, this remains at the last value
@@ -2492,7 +2582,7 @@ libelec_comp_get_incap_volts(const elec_comp_t *comp)
 /**
  * @return Depending on component type:
  *	- \ref ELEC_BATT and \ref ELEC_DIODE : always return false
- *	- \ref ELEC_TRU and \ref ELEC_INV : always returns true
+ *	- \ref ELEC_TRU, \ref ELEC_INV and \ref ELEC_XFRMR : always returns true
  *	- Any other component type will return true if is an AC component,
  *		and false if it is a DC component.
  */
@@ -2507,6 +2597,7 @@ libelec_comp_is_AC(const elec_comp_t *comp)
 		return (false);
 	case ELEC_TRU:
 	case ELEC_INV:
+	case ELEC_XFRMR:
 		return (true);
 	case ELEC_GEN:
 		return (comp->info->gen.freq != 0);
@@ -2584,7 +2675,8 @@ libelec_comp_is_powered(const elec_comp_t *comp)
 
 /**
  * @return The current efficiency of the component `comp`. This MUST be a
- *	component of type \ref ELEC_GEN, \ref ELEC_TRU or \ref ELEC_INV.
+ *	component of type \ref ELEC_GEN, \ref ELEC_TRU, \ref ELEC_INV or
+ *	\ref ELEC_XFRMR.
  */
 double
 libelec_comp_get_eff(const elec_comp_t *comp)
@@ -2600,6 +2692,9 @@ libelec_comp_get_eff(const elec_comp_t *comp)
 	case ELEC_TRU:
 	case ELEC_INV:
 		eff = comp->tru.eff;
+		break;
+	case ELEC_XFRMR:
+		eff = comp->xfrmr.eff;
 		break;
 	default:
 		VERIFY_FAIL();
@@ -2635,6 +2730,8 @@ libelec_comp_get_srcs(const elec_comp_t *comp,
  *		provides no voltage on its DC output.
  *	- `ELEC_INV`: generates no electrical load on its DC input and
  *		provides no voltage on its AC output.
+ *	- `ELEC_XFRMR`: generates no electrical load on its input and
+ *		provides no voltage on its output.
  *	- `ELEC_GEN`: generates no voltage on its output and requires no
  *		mechanical input power.
  *	- `ELEC_LOAD`: draws no electrical current and is permanently
@@ -3470,12 +3567,59 @@ network_paint_src_tru_inv(elec_comp_t *src, elec_comp_t *upstream,
 		}
 	} else {
 		comp->rw.in_volts = 0;
+		comp->rw.in_freq = 0;
 		comp->rw.out_volts = 0;
 		comp->rw.out_freq = 0;
 	}
 	ASSERT(comp->links[1].comp != NULL);
 	/*
 	 * The TRU/inverter becomes the source for downstream buses.
+	 */
+	if (comp->rw.out_volts != 0) {
+		network_paint_src_comp(comp, comp,
+		    comp->links[1].comp, depth + 1);
+	}
+}
+
+static void
+network_paint_src_xfrmr(elec_comp_t *src, elec_comp_t *upstream,
+    elec_comp_t *comp, unsigned depth)
+{
+	ASSERT(src != NULL);
+	ASSERT(upstream != NULL);
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT(comp->info->type == ELEC_XFRMR);
+	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
+
+	/* Transformers prevents back-flow of power from output to input */
+	if (upstream != comp->links[0].comp)
+		return;
+
+	add_src_up(comp, src, upstream);
+	ASSERT_MSG(comp->n_srcs == 1, "%s attempted to add a second "
+	    "AC power source ([0]=%s, [1]=%s). Multi-source feeding "
+	    "is NOT supported in AC networks.", comp->info->name,
+	    comp->srcs[0]->info->name, comp->srcs[1]->info->name);
+
+	if (!comp->rw.failed) {
+		if (comp->rw.in_volts < src->rw.out_volts) {
+			comp->rw.in_volts = src->rw.out_volts;
+			comp->rw.out_volts = comp->rw.in_volts *
+			    (comp->info->xfrmr.out_volts /
+			    comp->info->xfrmr.in_volts);
+			comp->rw.in_freq = src->rw.out_freq;
+			comp->rw.out_freq = comp->rw.in_freq;
+		}
+	} else {
+		comp->rw.in_volts = 0;
+		comp->rw.out_volts = 0;
+		comp->rw.in_freq = 0;
+		comp->rw.out_freq = 0;
+	}
+	ASSERT(comp->links[1].comp != NULL);
+	/*
+	 * The transformer becomes the source for downstream buses.
 	 */
 	if (comp->rw.out_volts != 0) {
 		network_paint_src_comp(comp, comp,
@@ -3566,6 +3710,9 @@ network_paint_src_comp(elec_comp_t *src, elec_comp_t *upstream,
 	case ELEC_INV:
 		network_paint_src_tru_inv(src, upstream, comp, depth);
 		break;
+	case ELEC_XFRMR:
+		network_paint_src_xfrmr(src, upstream, comp, depth);
+		break;
 	case ELEC_LOAD:
 		add_src_up(comp, src, upstream);
 		if (!comp->rw.failed) {
@@ -3646,6 +3793,40 @@ network_load_integrate_tru_inv(const elec_comp_t *src,
 	ASSERT3F(comp->tru.eff, <, 1);
 	comp->rw.in_amps = ((comp->rw.out_volts / comp->rw.in_volts) *
 	    comp->rw.out_amps) / comp->tru.eff;
+
+	return (comp->rw.in_amps);
+}
+
+static double
+network_load_integrate_xfrmr(const elec_comp_t *src,
+    const elec_comp_t *upstream, elec_comp_t *comp, unsigned depth, double d_t)
+{
+	ASSERT(src != NULL);
+	ASSERT(upstream != NULL);
+	ASSERT(comp != NULL);
+	ASSERT(comp->links[0].comp != NULL);
+	ASSERT(comp->links[1].comp != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT(comp->info->type == ELEC_XFRMR);
+	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
+
+	if (upstream != comp->links[0].comp)
+		return (0);
+
+	/* When hopping over to the output network, we become the src */
+	comp->rw.out_amps = network_load_integrate_comp(
+	    comp, comp, comp->links[1].comp, depth + 1, d_t);
+	if (comp->rw.failed || comp->rw.in_volts == 0) {
+		comp->rw.in_amps = 0;
+		comp->rw.out_amps = 0;
+		return (0);
+	}
+	comp->xfrmr.eff = fx_lin_multi(comp->rw.out_volts * comp->rw.out_amps,
+	    comp->info->xfrmr.eff_curve, true);
+	ASSERT3F(comp->xfrmr.eff, >, 0);
+	ASSERT3F(comp->xfrmr.eff, <, 1);
+	comp->rw.in_amps = ((comp->rw.out_volts / comp->rw.in_volts) *
+	    comp->rw.out_amps) / comp->xfrmr.eff;
 
 	return (comp->rw.in_amps);
 }
@@ -4005,7 +4186,8 @@ network_load_integrate_comp(const elec_comp_t *src,
 	ASSERT(src != NULL);
 	ASSERT(src->info != NULL);
 	ASSERT(src->info->type == ELEC_BATT || src->info->type == ELEC_GEN ||
-	    src->info->type == ELEC_TRU || src->info->type == ELEC_INV);
+	    src->info->type == ELEC_TRU || src->info->type == ELEC_INV ||
+	    src->info->type == ELEC_XFRMR);
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
 	ASSERT3U(depth, <, MAX_NETWORK_DEPTH);
@@ -4024,6 +4206,10 @@ network_load_integrate_comp(const elec_comp_t *src,
 	case ELEC_INV:
 		ASSERT3P(upstream, ==, comp->links[0].comp);
 		return (network_load_integrate_tru_inv(src, upstream, comp,
+		    depth, d_t));
+	case ELEC_XFRMR:
+		ASSERT3P(upstream, ==, comp->links[0].comp);
+		return (network_load_integrate_xfrmr(src, upstream, comp,
 		    depth, d_t));
 	case ELEC_LOAD:
 		return (network_load_integrate_load(src, comp, depth, d_t));
@@ -4162,6 +4348,7 @@ network_trace(const elec_comp_t *upstream, const elec_comp_t *comp,
 		break;
 	case ELEC_TRU:
 	case ELEC_INV:
+	case ELEC_XFRMR:
 		if (upstream != comp) {
 			if (do_print)
 				print_trace_data(comp, depth, false, 0);

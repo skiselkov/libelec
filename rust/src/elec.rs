@@ -153,6 +153,7 @@ pub enum CompType {
 	Gen,
 	TRU,
 	Inv,
+	Transformer,
 	Load,
 	Bus,
 	CB,
@@ -483,23 +484,28 @@ extern "C" {
 
 mod tests {
 	const TEST_NET_FILE: &str = "../nettest/test.net";
-	extern "C" {
-		fn crc64_init();
-	}
 	#[test]
 	fn load_net() {
 		use crate::ElecSys;
-		unsafe { crc64_init() };
+
+		acfutils::log::init(None, "nettest");
+		acfutils::crc64::init();
+
 		ElecSys::new(TEST_NET_FILE)
 		    .expect(&format!("Failed to load net {}", TEST_NET_FILE));
+
+		acfutils::log::fini();
 	}
 	#[test]
 	fn load_and_run_net() {
 		use crate::ElecSys;
-		unsafe { crc64_init() };
+
+		acfutils::log::init(None, "nettest");
+		acfutils::crc64::init();
+
 		let mut sys = ElecSys::new(TEST_NET_FILE)
 		    .expect(&format!("Failed to load net {}", TEST_NET_FILE));
-		sys.start();
+		sys.start().expect("Startup failed");
 		/*
 		 * let the network run for at least a few loops, so the
 		 * system state has time to stabilize
@@ -517,11 +523,16 @@ mod tests {
 				    comp.in_pwr(), comp.out_pwr());
 			}
 		}
+
+		acfutils::log::fini();
 	}
 	#[test]
 	fn list_all_comps() {
 		use crate::ElecSys;
-		unsafe { crc64_init() };
+
+		acfutils::log::init(None, "nettest");
+		acfutils::crc64::init();
+
 		let sys = ElecSys::new(TEST_NET_FILE)
 		    .expect(&format!("Failed to load net {}", TEST_NET_FILE));
 		for comp in sys.all_comps().iter() {
@@ -537,6 +548,7 @@ mod tests {
 				    comp.in_pwr(), comp.out_pwr());
 			}
 		}
+		acfutils::log::fini();
 	}
 	#[test]
 	fn serialize_deserialize() {
@@ -544,10 +556,12 @@ mod tests {
 		use acfutils::conf::Conf;
 		let mut conf = Conf::new();
 
-		unsafe { crc64_init() };
+		acfutils::log::init(None, "nettest");
+		acfutils::crc64::init();
+
 		let mut sys = ElecSys::new(TEST_NET_FILE)
 		    .expect(&format!("Failed to load net {}", TEST_NET_FILE));
-		sys.start();
+		sys.start().expect("Start failed");
 		/*
 		 * let the network run for at least a few loops, so that
 		 * when we attempt to serialize, we need to interact with
@@ -558,5 +572,7 @@ mod tests {
 		sys.deserialize(&conf, "libelec")
 		    .expect("Cannot deserialize our own network?!");
 		sys.stop();
+
+		acfutils::log::fini();
 	}
 }

@@ -95,6 +95,13 @@ typedef enum {
 	 */
 	ELEC_INV,
 	/**
+	 * A transformer changes the AC voltage on its input into a
+	 * different AC voltage on its output. The voltage ratio is fixed
+	 * based on the ratio of the number of turns between the
+	 * transformer's primary and secondary windings.
+	 */
+	ELEC_XFRMR,
+	/**
 	 * A load is a consumer of electrical energy. This can be anything
 	 * you need it to be. libelec tells you if the load is powered
 	 * (and how much energy it is consuming), and you then implement
@@ -281,6 +288,17 @@ typedef struct {
 } elec_tru_info_t;
 
 /**
+ * Info structure describing a transformer.
+ */
+typedef struct {
+	double		in_volts;	/**< Nominal input voltage. */
+	double		out_volts;	/**< Nominal output voltage. */
+	vect2_t		*eff_curve;	/**< Output Watts -> efficiency curve */
+	const elec_comp_info_t *input;	/**< input bus side */
+	const elec_comp_info_t *output;	/**< output bus side */
+} elec_xfrmr_info_t;
+
+/**
  * This is the callback type used by electrical loads for cases where
  * the caller has installed a custom load demand callback using
  * libelec_load_set_load_cb().
@@ -396,6 +414,7 @@ struct elec_comp_info_s {
 		elec_gen_info_t		gen;	/**< Valid for an ELEC_GEN. */
 		/** Valid for an ELEC_TRU and ELEC_INV. */
 		elec_tru_info_t		tru;
+		elec_xfrmr_info_t	xfrmr;
 		elec_load_info_t	load;	/**< Valid for an ELEC_LOAD. */
 		elec_bus_info_t		bus;	/**< Valid for an ELEC_BUS. */
 		elec_cb_info_t		cb;	/**< Valid for an ELEC_CB. */

@@ -54,6 +54,7 @@ comp_info2sz(const elec_comp_info_t *info)
 		return (VECT2(3, 3));
 	case ELEC_TRU:
 	case ELEC_INV:
+	case ELEC_XFRMR:
 	case ELEC_LOAD:
 		return (VECT2(3.5, 3.5));
 	case ELEC_BUS:

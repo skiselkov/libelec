@@ -561,6 +561,56 @@ draw_tru_inv(cairo_t *cr, double pos_scale, const elec_comp_info_t *info)
 }
 
 static void
+draw_xfrmr(cairo_t *cr, double pos_scale, const elec_comp_info_t *info)
+{
+	vect2_t pos;
+	vect3_t color;
+	char name[MAX_NAME_LEN];
+
+	ASSERT(cr != NULL);
+	ASSERT(info != NULL);
+	pos = info->gui.pos;
+	color = info->gui.color;
+
+	cairo_new_path(cr);
+
+	/* Background fill */
+	cairo_set_source_rgb(cr, color.x, color.y, color.z);
+	cairo_rectangle(cr, PX(pos.x - 1.5), PX(pos.y - 1.5), PX(3), PX(3));
+	cairo_fill(cr);
+
+	/* Line art */
+	cairo_set_source_rgb(cr, 0, 0, 0);
+	/* Surrounding box */
+	cairo_rectangle(cr, PX(pos.x - 1.5), PX(pos.y - 1.5), PX(3), PX(3));
+
+	/* Cross-line through the box */
+	cairo_move_to(cr, PX(pos.x - 1.5), PX(pos.y + 1.5));
+	cairo_rel_line_to(cr, PX(3), PX(-3));
+
+	/* Wavy line showing input & output sidesside */
+	cairo_move_to(cr, PX(pos.x - 0.8), PX(pos.y - 1));
+	cairo_rel_move_to(cr, PX(-0.5), 0);
+	cairo_rel_curve_to(cr, PX(0.1), PX(-0.4),
+	    PX(0.4), PX(-0.4), PX(0.5), 0);
+	cairo_rel_curve_to(cr, PX(0.1), PX(0.4),
+	    PX(0.4), PX(0.4), PX(0.5), 0);
+
+	cairo_move_to(cr, PX(pos.x + 0.8), PX(pos.y + 1));
+	cairo_rel_move_to(cr, PX(-0.5), 0);
+	cairo_rel_curve_to(cr, PX(0.1), PX(-0.4),
+	    PX(0.4), PX(-0.4), PX(0.5), 0);
+	cairo_rel_curve_to(cr, PX(0.1), PX(0.4),
+	    PX(0.4), PX(0.4), PX(0.5), 0);
+
+	cairo_stroke(cr);
+
+	make_comp_name(info->name, name);
+	show_text_aligned(cr, PX(pos.x - 2), PX(pos.y),
+	    TEXT_ALIGN_RIGHT, "%s", name);
+}
+
+static void
 draw_node(cairo_t *cr, double pos_scale, vect2_t pos)
 {
 	ASSERT(cr != NULL);
@@ -890,6 +940,9 @@ libelec_draw_layout(const elec_sys_t *sys, cairo_t *cr, double pos_scale,
 		case ELEC_INV:
 			draw_tru_inv(cr, pos_scale, info);
 			break;
+		case ELEC_XFRMR:
+			draw_xfrmr(cr, pos_scale, info);
+			break;
 		case ELEC_TIE:
 			draw_tie(cr, pos_scale, comp);
 			break;
@@ -999,6 +1052,7 @@ draw_comp_info(const elec_comp_t *comp, cairo_t *cr, double pos_scale,
 	case ELEC_BATT:
 	case ELEC_TRU:
 	case ELEC_INV:
+	case ELEC_XFRMR:
 		cairo_set_font_size(cr, 0.75 * font_sz);
 		if (comp->info->type == ELEC_INV)
 			draw_in_out_suffixes(cr, pos_scale, pos, 3, 4);
@@ -1224,6 +1278,35 @@ draw_tru_inv_info(const elec_comp_t *tru, cairo_t *cr, double pos_scale,
 	y += LINE_HEIGHT;
 
 	draw_comp_info(tru, cr, pos_scale, font_sz,
+	    VECT2(pos.x + TEXT_OFF_X, y));
+}
+
+static void
+draw_xfrmr_info(const elec_comp_t *xfrmr, cairo_t *cr, double pos_scale,
+    double font_sz, vect2_t pos)
+{
+	const double TEXT_OFF_X = -8.5, TEXT_OFF_Y = 3;
+	double y;
+
+	ASSERT(xfrmr != NULL);
+	ASSERT(xfrmr->info != NULL);
+	ASSERT(xfrmr->info->type == ELEC_XFRMR);
+
+	draw_comp_bg(cr, pos_scale, VECT2(pos.x - 2, pos.y + 5.5),
+	    VECT2(14, 15.5));
+	draw_xfrmr(cr, pos_scale, xfrmr->info);
+
+	y = pos.y + TEXT_OFF_Y;
+
+	show_text_aligned(cr, PX(pos.x + TEXT_OFF_X), PX(y), TEXT_ALIGN_LEFT,
+	    "Type: Transformer");
+	y += LINE_HEIGHT;
+
+	show_text_aligned(cr, PX(pos.x + TEXT_OFF_X), PX(y), TEXT_ALIGN_LEFT,
+	    "Efficiency: %.1f%%", xfrmr->xfrmr.eff * 100);
+	y += LINE_HEIGHT;
+
+	draw_comp_info(xfrmr, cr, pos_scale, font_sz,
 	    VECT2(pos.x + TEXT_OFF_X, y));
 }
 
@@ -1458,6 +1541,9 @@ libelec_draw_comp_info(const elec_comp_t *comp, cairo_t *cr,
 	case ELEC_TRU:
 	case ELEC_INV:
 		draw_tru_inv_info(comp, cr, pos_scale, font_sz, pos);
+		break;
+	case ELEC_XFRMR:
+		draw_xfrmr_info(comp, cr, pos_scale, font_sz, pos);
 		break;
 	case ELEC_LOAD:
 		draw_load_info(comp, cr, pos_scale, font_sz, pos);

@@ -149,6 +149,10 @@ typedef struct {
 } elec_tru_t;
 
 typedef struct {
+	double		eff;
+} elec_xfrmr_t;
+
+typedef struct {
 	elec_comp_t	*bus;
 	LIBELEC_SER_START_MARKER;
 	/* Virtual input capacitor voltage */
@@ -251,6 +255,7 @@ struct elec_comp_s {
 		elec_batt_t	batt;
 		elec_gen_t	gen;
 		elec_tru_t	tru;
+		elec_xfrmr_t	xfrmr;
 		elec_load_t	load;
 		elec_scb_t	scb;
 		elec_tie_t	tie;
