@@ -38,6 +38,11 @@ struct libelec_vis_s {
 	const elec_comp_t	*selected;
 
 	XPLMFlightLoopID	floop;
+#ifdef	LIBELEC_VIS_WITH_WIN_KEEPER
+	win_keeper_t		*wk;
+	char			*wk_name;
+	unsigned		wk_inst;
+#endif	/* defined(LIBELEC_VIS_WITH_WIN_KEEPER) */
 };
 
 static vect2_t
@@ -414,6 +419,14 @@ libelec_vis_destroy(libelec_vis_t *vis)
 	if (vis == NULL)
 		return;
 
+#ifdef	LIBELEC_VIS_WITH_WIN_KEEPER
+	if (vis->wk != NULL) {
+		ASSERT(vis->wk_name != NULL);
+		win_keeper_unregister(vis->wk, vis->wk_name, vis->wk_inst);
+		free(vis->wk_name);
+	}
+#endif	/* defined(LIBELEC_VIS_WITH_WIN_KEEPER) */
+
 	if (vis->mtcr != NULL)
 		mt_cairo_render_fini(vis->mtcr);
 	mutex_destroy(&vis->lock);
@@ -422,6 +435,34 @@ libelec_vis_destroy(libelec_vis_t *vis)
 
 	ZERO_FREE(vis);
 }
+
+#ifdef	LIBELEC_VIS_WITH_WIN_KEEPER
+
+void
+libelec_vis_set_win_keeper(libelec_vis_t *vis, win_keeper_t *wk,
+    const char *win_name, unsigned inst)
+{
+	ASSERT(vis != NULL);
+	if (wk == vis->wk) {
+		return;
+	}
+	if (vis->wk != NULL) {
+		ASSERT(vis->wk_name != NULL);
+		win_keeper_unregister(vis->wk, vis->wk_name, vis->wk_inst);
+		free(vis->wk_name);
+		vis->wk = NULL;
+		vis->wk_name = NULL;
+		vis->wk_inst = 0;
+	}
+	if (wk != NULL) {
+		ASSERT(win_name != NULL);
+		vis->wk = wk;
+		vis->wk_name = safe_strdup(win_name);
+		vis->wk_inst = inst;
+	}
+}
+
+#endif	/* defined(LIBELEC_VIS_WITH_WIN_KEEPER) */
 
 /**
  * Sets the panning offset of the contents of the rendering. Initially
@@ -475,7 +516,16 @@ libelec_vis_open(libelec_vis_t *vis)
 		XPLMSetWindowIsVisible(vis->win, true);
 		XPLMScheduleFlightLoop(vis->floop, -1, true);
 	}
+
+#ifdef	LIBELEC_VIS_WITH_WIN_KEEPER
+	if (!window_follow_VR(vis->win) && vis->wk != NULL) {
+		ASSERT(vis->wk_name != NULL);
+		win_keeper_register(vis->wk, vis->wk_name, vis->wk_inst,
+		    vis->win, WIN_WIDTH, WIN_HEIGHT);
+	}
+#else	/* !defined(LIBELEC_VIS_WITH_WIN_KEEPER) */
 	window_follow_VR(vis->win);
+#endif	/* !defined(LIBELEC_VIS_WITH_WIN_KEEPER) */
 }
 
 /**
@@ -494,4 +544,17 @@ libelec_vis_close(libelec_vis_t *vis)
 	ASSERT(vis != NULL);
 	ASSERT(vis->win != NULL);
 	XPLMSetWindowIsVisible(vis->win, false);
+}
+
+/**
+ * Returns the native XPLMWindowID containing the visualizer. This can be
+ * used for things like popping the window out of the simulator, or
+ * controlling its positioning.
+ */
+XPLMWindowID
+libelec_vis_get_win(const libelec_vis_t *vis)
+{
+	ASSERT(vis != NULL);
+	ASSERT(vis->win != NULL);
+	return (vis->win);
 }

@@ -35,7 +35,13 @@
 
 #include <stdbool.h>
 
+#include <XPLMDisplay.h>
+
 #include <acfutils/mt_cairo_render.h>
+
+#ifdef	LIBELEC_VIS_WITH_WIN_KEEPER
+#include <win_keeper.h>
+#endif
 
 #include "libelec.h"
 
@@ -48,10 +54,16 @@ typedef struct libelec_vis_s libelec_vis_t;
 libelec_vis_t *libelec_vis_new(const elec_sys_t *sys, double pos_scale,
     double font_sz);
 void libelec_vis_destroy(libelec_vis_t *vis);
+#ifdef	LIBELEC_VIS_WITH_WIN_KEEPER
+void libelec_vis_set_win_keeper(libelec_vis_t *vis, win_keeper_t *wk,
+    const char *win_name, unsigned inst);
+#endif	/* defined(LIBELEC_VIS_WITH_WIN_KEEPER) */
 
 bool libelec_vis_is_open(libelec_vis_t *vis);
 void libelec_vis_open(libelec_vis_t *vis);
 void libelec_vis_close(libelec_vis_t *vis);
+
+XPLMWindowID libelec_vis_get_win(const libelec_vis_t *vis);
 
 void libelec_vis_set_offset(libelec_vis_t *vis, vect2_t offset);
 vect2_t libelec_vis_get_offset(const libelec_vis_t *vis);
