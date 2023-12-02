@@ -22,6 +22,10 @@
 #include <acfutils/geom.h>
 #include <acfutils/sysmacros.h>
 
+#ifdef	LIBELEC_WITH_LIBSWITCH
+#include <libswitch.h>
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -432,6 +436,19 @@ struct elec_comp_info_s {
 		bool			invis;
 		vect3_t			color;
 	} gui;
+	/**
+	 * Physical location information. This allows locating the component
+	 * in 3D space in the actual aircraft. libelec doesn't use this for
+	 * anything, but you can use this to implement informational systems,
+	 * such as a 3D hint system.
+	 */
+	struct {
+		/// Location in 3D space in meters. `NULL_VECT3` if undefined.
+		vect3_t			pos;
+		/// Rotation in degrees (x=pitch, y=yaw, z=roll).
+		/// `NULL_VECT3` if undefined.
+		vect3_t			rot;
+	} phys;
 };
 
 /**
@@ -539,6 +556,9 @@ elec_get_load_cb_t libelec_load_get_load_cb(elec_comp_t *load);
 void libelec_cb_set(elec_comp_t *comp, bool set);
 bool libelec_cb_get(const elec_comp_t *comp);
 double libelec_cb_get_temp(const elec_comp_t *comp);
+#ifdef	LIBELEC_WITH_LIBSWITCH
+switch_t *libelec_cb_get_sw(const elec_comp_t *comp);
+#endif	// defined(LIBELEC_WITH_LIBSWITCH)
 
 /* Ties */
 void libelec_tie_set_list(elec_comp_t *comp, size_t list_len,

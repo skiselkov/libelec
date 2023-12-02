@@ -1555,6 +1555,8 @@ infos_parse(const char *filename, size_t *num_infos)
 	for (size_t i = 0; i < num_comps; i++) {
 		elec_comp_info_t *info = &infos[i];
 		info->gui.pos = NULL_VECT2;
+		info->phys.pos = NULL_VECT3;
+		info->phys.rot = NULL_VECT3;
 	}
 
 	linenum = 0;
@@ -1879,8 +1881,8 @@ infos_parse(const char *filename, size_t *num_infos)
 				goto errout;
 			}
 		} else if ((strcmp(cmd, "LOADCB") == 0 ||
-		    strcmp(cmd, "LOADCB3") == 0) && (n_comps == 2 ||
-		    n_comps == 3) && info != NULL && info->type == ELEC_LOAD) {
+		    strcmp(cmd, "LOADCB3") == 0) && n_comps >= 2 &&
+		    info != NULL && info->type == ELEC_LOAD) {
 			elec_comp_info_t *cb, *bus;
 
 			ASSERT3U(comp_i + 1, <, num_comps);
@@ -1892,9 +1894,15 @@ infos_parse(const char *filename, size_t *num_infos)
 			cb->cb.max_amps = atof(comps[1]);
 			cb->cb.triphase = (strcmp(cmd, "LOADCB3") == 0);
 			cb->autogen = true;
-			if (n_comps == 3) {
+			if (n_comps >= 3) {
 				strlcpy(cb->location, comps[2],
 				    sizeof (cb->location));
+			}
+			if (n_comps >= 9) {
+				cb->phys.pos = VECT3(atof(comps[3]),
+				    atof(comps[4]), atof(comps[5]));
+				cb->phys.rot = VECT3(atof(comps[6]),
+				    atof(comps[7]), atof(comps[8]));
 			}
 
 			bus = &infos[comp_i++];
@@ -1980,6 +1988,14 @@ infos_parse(const char *filename, size_t *num_infos)
 		    info != NULL) {
 			strlcpy(info->location, comps[1],
 			    sizeof (info->location));
+		} else if (strcmp(cmd, "PHYS_POS") == 0 && n_comps == 4 &&
+		    info != NULL) {
+			info->phys.pos = VECT3(atof(comps[1]), atof(comps[2]),
+			    atof(comps[3]));
+		} else if (strcmp(cmd, "PHYS_ROT") == 0 && n_comps == 4 &&
+		    info != NULL) {
+			info->phys.rot = VECT3(atof(comps[1]), atof(comps[2]),
+			    atof(comps[3]));
 		} else {
 			logMsg("%s:%d: unknown or malformed line",
 			    filename, linenum);
@@ -3087,7 +3103,8 @@ network_reset(elec_sys_t *sys, double d_t)
 			break;
 		case ELEC_CB:
 #ifdef	LIBELEC_WITH_LIBSWITCH
-			if (comp->scb.sw != NULL) {
+			if (comp->scb.sw != NULL &&
+			    !libswitch_get_failed(comp->scb.sw)) {
 				comp->scb.cur_set =
 				    !libswitch_read(comp->scb.sw, NULL);
 			}
@@ -4558,6 +4575,12 @@ libelec_cb_set(elec_comp_t *comp, bool set)
 	 * copies its the breaker state to wk_set at the start.
 	 */
 	comp->scb.cur_set = set;
+#ifdef	LIBELEC_WITH_LIBSWITCH
+	if (comp->scb.sw != NULL) {
+		libswitch_set_failed(comp->scb.sw, false);
+		libswitch_set(comp->scb.sw, !comp->scb.cur_set);
+	}
+#endif	// defined(LIBELEC_WITH_LIBSWITCH)
 }
 
 /**
@@ -4589,6 +4612,20 @@ libelec_cb_get_temp(const elec_comp_t *comp)
 	/* atomic read, no need to lock */
 	return (comp->scb.temp);
 }
+
+#ifdef	LIBELEC_WITH_LIBSWITCH
+
+switch_t *
+libelec_cb_get_sw(const elec_comp_t *comp)
+{
+	ASSERT(comp != NULL);
+	ASSERT(comp->info != NULL);
+	ASSERT3U(comp->info->type, ==, ELEC_CB);
+	// immutable after init
+	return (comp->scb.sw);
+}
+
+#endif	// defined(LIBELEC_WITH_LIBSWITCH)
 
 /**
  * Reconfigures a tie's current state to tie together the bus connections
