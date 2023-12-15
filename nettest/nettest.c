@@ -918,7 +918,7 @@ print_ties_i(elec_comp_t *comp, void *userinfo)
 {
 	const elec_comp_info_t *info = libelec_comp2info(comp);
 	size_t n_conns = libelec_comp_get_num_conns(comp);
-	elec_comp_t *bus_list[n_conns];
+	elec_comp_t **bus_list = safe_calloc(n_conns, sizeof (*bus_list));
 	size_t n_tied;
 	const char *tie_name = (userinfo != NULL ? userinfo : NULL);
 	const char **bus_names = NULL;
@@ -939,6 +939,7 @@ print_ties_i(elec_comp_t *comp, void *userinfo)
 	    PRINT_STR_ARRAY("BUSES", bus_names, n_tied),
 	    NULL);
 	free(bus_names);
+	free(bus_list);
 }
 
 static void

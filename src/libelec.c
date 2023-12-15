@@ -4640,7 +4640,7 @@ libelec_cb_get_sw(const elec_comp_t *comp)
  */
 void
 libelec_tie_set_list(elec_comp_t *comp, size_t list_len,
-    elec_comp_t *const bus_list[STATIC_ARRAY_LEN_ARG(list_len)])
+    elec_comp_t *const*bus_list)
 {
 	bool *new_state;
 
@@ -4802,8 +4802,7 @@ libelec_tie_get_all(elec_comp_t *comp)
  * @see libelec_tie_get_num_buses()
  */
 size_t
-libelec_tie_get_list(elec_comp_t *comp, size_t cap,
-    elec_comp_t *bus_list[STATIC_ARRAY_LEN_ARG(cap)])
+libelec_tie_get_list(elec_comp_t *comp, size_t cap, elec_comp_t **bus_list)
 {
 	size_t n_tied = 0;
 

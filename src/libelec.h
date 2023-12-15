@@ -562,13 +562,13 @@ switch_t *libelec_cb_get_sw(const elec_comp_t *comp);
 
 /* Ties */
 void libelec_tie_set_list(elec_comp_t *comp, size_t list_len,
-    elec_comp_t *const bus_list[STATIC_ARRAY_LEN_ARG(list_len)]);
+    elec_comp_t *const*bus_list);
 void libelec_tie_set(elec_comp_t *comp, ...) SENTINEL_ATTR;
 void libelec_tie_set_v(elec_comp_t *comp, va_list ap);
 void libelec_tie_set_all(elec_comp_t *comp, bool tied);
 bool libelec_tie_get_all(elec_comp_t *comp);
 size_t libelec_tie_get_list(elec_comp_t *comp, size_t cap,
-    elec_comp_t *bus_list[STATIC_ARRAY_LEN_ARG(cap)]);
+    elec_comp_t **bus_list);
 size_t libelec_tie_get_num_buses(const elec_comp_t *comp);
 /*
  * Due to default argument promotion and va_start underneath,
