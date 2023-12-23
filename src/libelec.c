@@ -1102,19 +1102,16 @@ elec_comp_serialize(elec_comp_t *comp, conf_t *ser, const char *prefix)
 		    prefix, comp->info->name);
 		break;
 	case ELEC_GEN:
-		LIBELEC_SERIALIZE_DATA_V(&comp->batt, ser, "%s/%s/gen",
+		LIBELEC_SERIALIZE_DATA_V(&comp->gen, ser, "%s/%s/gen",
 		    prefix, comp->info->name);
 		break;
 	case ELEC_LOAD:
-		LIBELEC_SERIALIZE_DATA_V(&comp->batt, ser, "%s/%s/load",
+		LIBELEC_SERIALIZE_DATA_V(&comp->load, ser, "%s/%s/load",
 		    prefix, comp->info->name);
 		break;
 	case ELEC_CB:
 		LIBELEC_SERIALIZE_DATA_V(&comp->scb, ser, "%s/%s/cb",
 		    prefix, comp->info->name);
-		break;
-	case ELEC_SHUNT:
-		/* Nothing to serialize for a shunt */
 		break;
 	case ELEC_TIE:
 		mutex_enter(&comp->tie.lock);
@@ -1123,7 +1120,13 @@ elec_comp_serialize(elec_comp_t *comp, conf_t *ser, const char *prefix)
 		    prefix, comp->info->name);
 		mutex_exit(&comp->tie.lock);
 		break;
-	default:
+	case ELEC_SHUNT:
+	case ELEC_TRU:
+	case ELEC_INV:
+	case ELEC_XFRMR:
+	case ELEC_BUS:
+	case ELEC_DIODE:
+	case ELEC_LABEL_BOX:
 		break;
 	}
 }
@@ -1146,19 +1149,16 @@ elec_comp_deserialize(elec_comp_t *comp, const conf_t *ser, const char *prefix)
 		    prefix, comp->info->name);
 		break;
 	case ELEC_GEN:
-		LIBELEC_DESERIALIZE_DATA_V(&comp->batt, ser, "%s/%s/gen",
+		LIBELEC_DESERIALIZE_DATA_V(&comp->gen, ser, "%s/%s/gen",
 		    prefix, comp->info->name);
 		break;
 	case ELEC_LOAD:
-		LIBELEC_DESERIALIZE_DATA_V(&comp->batt, ser, "%s/%s/load",
+		LIBELEC_DESERIALIZE_DATA_V(&comp->load, ser, "%s/%s/load",
 		    prefix, comp->info->name);
 		break;
 	case ELEC_CB:
 		LIBELEC_DESERIALIZE_DATA_V(&comp->scb, ser, "%s/%s/cb",
 		    prefix, comp->info->name);
-		break;
-	case ELEC_SHUNT:
-		/* Nothing to deserialize for a shunt */
 		break;
 	case ELEC_TIE:
 		mutex_enter(&comp->tie.lock);
@@ -1171,7 +1171,13 @@ elec_comp_deserialize(elec_comp_t *comp, const conf_t *ser, const char *prefix)
 		}
 		mutex_exit(&comp->tie.lock);
 		break;
-	default:
+	case ELEC_SHUNT:
+	case ELEC_TRU:
+	case ELEC_INV:
+	case ELEC_XFRMR:
+	case ELEC_BUS:
+	case ELEC_DIODE:
+	case ELEC_LABEL_BOX:
 		break;
 	}
 
