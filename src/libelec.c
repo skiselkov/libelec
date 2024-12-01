@@ -544,6 +544,42 @@ libelec_get_comp_infos(const elec_sys_t *sys, size_t *num_infos)
 	return (sys->comp_infos);
 }
 
+static void
+scb_report_popped(const elec_comp_t REQ_PTR(comp))
+{
+	ASSERT3U(comp->info->type, ==, ELEC_CB);
+	struct tm tm = {};
+	const elec_scb_pop_t *pop = &comp->scb.pop;
+	lacf_gmtime_r(&pop->when, &tm);
+	char datetimebuf[64] = {};
+	strftime(datetimebuf, sizeof (datetimebuf), "%F %TZ", &tm);
+	switch (pop->reason) {
+	    case SCB_POP_REASON_OC:
+		logMsg("%s popped at %s due to overcurrent (%.3f Amps)",
+		    comp->info->name, datetimebuf, pop->current);
+		break;
+	    case SCB_POP_REASON_USER:
+		logMsg("%s popped at %s due to user action",
+		    comp->info->name, datetimebuf);
+		break;
+	    case SCB_POP_REASON_EXT:
+		logMsg("%s popped at %s due to external failure trigger",
+		    comp->info->name, datetimebuf);
+		break;
+	}
+}
+
+static void
+scb_set_popped(elec_comp_t REQ_PTR(comp), elec_scb_pop_reason_t reason,
+    double amps)
+{
+	ASSERT3U(comp->info->type, ==, ELEC_CB);
+	comp->scb.pop.reason = reason;
+	comp->scb.pop.current = amps;
+	comp->scb.pop.when = time(NULL);
+	scb_report_popped(comp);
+}
+
 static bool
 comp_alloc(elec_sys_t *sys, elec_comp_info_t *info, unsigned *src_i)
 {
@@ -1112,6 +1148,12 @@ elec_comp_serialize(elec_comp_t *comp, conf_t *ser, const char *prefix)
 	case ELEC_CB:
 		LIBELEC_SERIALIZE_DATA_V(&comp->scb, ser, "%s/%s/cb",
 		    prefix, comp->info->name);
+		conf_set_i_v(ser, "%s/%s/cb/pop/reason",
+		    comp->scb.pop.reason, prefix, comp->info->name);
+		conf_set_lli_v(ser, "%s/%s/cb/pop/when",
+		    comp->scb.pop.when, prefix, comp->info->name);
+		conf_set_f_v(ser, "%s/%s/cb/pop/current",
+		    comp->scb.pop.current, prefix, comp->info->name);
 		break;
 	case ELEC_TIE:
 		mutex_enter(&comp->tie.lock);
@@ -1159,6 +1201,24 @@ elec_comp_deserialize(elec_comp_t *comp, const conf_t *ser, const char *prefix)
 	case ELEC_CB:
 		LIBELEC_DESERIALIZE_DATA_V(&comp->scb, ser, "%s/%s/cb",
 		    prefix, comp->info->name);
+		int reason = 0;
+		long long when = 0;
+		double current = 0.0;
+		if (conf_get_i_v(ser, "%s/%s/cb/pop/reason",
+		    &reason, prefix, comp->info->name) &&
+		    reason >= SCB_POP_REASON_OC &&
+		    reason <= SCB_POP_REASON_EXT &&
+		    conf_get_lli_v(ser, "%s/%s/cb/pop/when",
+		    &when, prefix, comp->info->name) && when > 0 &&
+		    conf_get_d_v(ser, "%s/%s/cb/pop/current",
+		    &current, prefix, comp->info->name) && current >= 0.0) {
+			comp->scb.pop.reason = reason;
+			comp->scb.pop.when = when;
+			comp->scb.pop.current = current;
+			if (!comp->scb.cur_set) {
+				scb_report_popped(comp);
+			}
+		}
 		break;
 	case ELEC_TIE:
 		mutex_enter(&comp->tie.lock);
@@ -3111,8 +3171,13 @@ network_reset(elec_sys_t *sys, double d_t)
 #ifdef	LIBELEC_WITH_LIBSWITCH
 			if (comp->scb.sw != NULL &&
 			    !libswitch_get_failed(comp->scb.sw)) {
-				comp->scb.cur_set =
-				    !libswitch_read(comp->scb.sw, NULL);
+				bool_t new_set =
+				    (libswitch_read(comp->scb.sw, NULL) == 0.0);
+				if (comp->scb.cur_set && !new_set) {
+					scb_set_popped(comp,
+					    SCB_POP_REASON_USER, 0.0);
+				}
+				comp->scb.cur_set = new_set;
 			}
 #endif	/* defined(LIBELEC_WITH_LIBSWITCH) */
 			comp->scb.wk_set = comp->scb.cur_set;
@@ -3259,6 +3324,9 @@ network_update_cb(elec_comp_t *cb, double d_t)
 	FILTER_IN(cb->scb.temp, amps_rat, d_t, cb->info->cb.rate);
 
 	if (cb->scb.temp >= 1.0) {
+		if (cb->scb.cur_set) {
+			scb_set_popped(cb, SCB_POP_REASON_OC, amps_rat);
+		}
 		cb->scb.wk_set = false;
 		cb->scb.cur_set = false;
 #ifdef	LIBELEC_WITH_LIBSWITCH
@@ -4576,6 +4644,9 @@ libelec_cb_set(elec_comp_t *comp, bool set)
 	ASSERT(comp != NULL);
 	ASSERT(comp->info != NULL);
 	ASSERT3U(comp->info->type, ==, ELEC_CB);
+	if (comp->scb.cur_set && !set) {
+		scb_set_popped(comp, SCB_POP_REASON_EXT, 0.0);
+	}
 	/*
 	 * This is atomic, no locking required. Also, the worker
 	 * copies its the breaker state to wk_set at the start.

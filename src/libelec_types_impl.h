@@ -165,6 +165,18 @@ typedef struct {
 	bool		seen;
 } elec_load_t;
 
+typedef enum {
+    SCB_POP_REASON_OC,
+    SCB_POP_REASON_USER,
+    SCB_POP_REASON_EXT,
+} elec_scb_pop_reason_t;
+
+typedef struct {
+	elec_scb_pop_reason_t	reason;
+	time_t			when;
+	double			current;	// Amps
+} elec_scb_pop_t;
+
 typedef struct {
 #ifdef	LIBELEC_WITH_LIBSWITCH
 	switch_t	*sw;		/* optional libswitch link */
@@ -174,6 +186,7 @@ typedef struct {
 	bool_t		wk_set;
 	double		temp;		/* relative 0.0 - 1.0 */
 	LIBELEC_SER_END_MARKER;
+	elec_scb_pop_t	pop;
 } elec_scb_t;
 
 typedef struct {
