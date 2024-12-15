@@ -552,7 +552,10 @@ scb_report_popped(const elec_comp_t REQ_PTR(comp))
 	const elec_scb_pop_t *pop = &comp->scb.pop;
 	lacf_gmtime_r(&pop->when, &tm);
 	char datetimebuf[64] = {};
-	strftime(datetimebuf, sizeof (datetimebuf), "%F %TZ", &tm);
+	snprintf(datetimebuf, sizeof (datetimebuf),
+	    "%d-%02d-%02d %02d:%02d:%02dZ",
+	    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+	    tm.tm_hour, tm.tm_min, tm.tm_sec);
 	switch (pop->reason) {
 	    case SCB_POP_REASON_OC:
 		logMsg("%s popped at %s due to overcurrent (%.3f Amps)",
